@@ -6,8 +6,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, create_engine, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+
+from schemas.requests import CreateRiskRequest
+from schemas.responses import CreateRiskResponse, RiskResponse
 
 load_dotenv()
 
@@ -29,6 +32,28 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
+
+def migrate_risk_schema():
+    with engine.connect() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(Risk)")).fetchall()
+        }
+        if "title" in columns and "name" not in columns:
+            conn.execute(text('ALTER TABLE "Risk" RENAME COLUMN title TO name'))
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(Risk)")).fetchall()
+        }
+        if "category" not in columns:
+            conn.execute(
+                text('ALTER TABLE "Risk" ADD COLUMN category JSON NOT NULL DEFAULT \'[]\'')
+            )
+        conn.commit()
+
+
+migrate_risk_schema()
+
 app = FastAPI()
 
 app.add_middleware(
@@ -47,8 +72,13 @@ class Risk(Base):
     __tablename__ = "Risk"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    )
     createdAt: Mapped[datetime] = mapped_column(
         "createdAt",
         DateTime,
@@ -91,15 +121,6 @@ def get_db():
         db.close()
 
 
-def serialize_risk(risk: Risk) -> dict:
-    return {
-        "id": risk.id,
-        "title": risk.title,
-        "description": risk.description,
-        "createdAt": risk.createdAt.isoformat().replace("+00:00", "Z"),
-    }
-
-
 def serialize_notification(notification: Notification) -> dict:
     return {
         "id": notification.id,
@@ -110,19 +131,20 @@ def serialize_notification(notification: Notification) -> dict:
     }
 
 
-@app.post("/risks")
-async def create_risk(body: dict):
+@app.post("/risks", response_model=CreateRiskResponse)
+async def create_risk(body: CreateRiskRequest):
     try:
-        title = body["title"]
-        description = body["description"]
-
         with get_db() as db:
-            risk = Risk(title=title, description=description)
+            risk = Risk(
+                name=body.name,
+                description=body.description,
+                category=body.category,
+            )
             db.add(risk)
             db.flush()
 
             notification = Notification(
-                message=f"New Risk Created: {risk.title}",
+                message=f"New Risk Created: {risk.name}",
                 riskId=risk.id,
                 viewed=False,
             )
@@ -130,7 +152,7 @@ async def create_risk(body: dict):
             db.commit()
             db.refresh(risk)
 
-            return {"success": True, "risk": serialize_risk(risk)}
+            return CreateRiskResponse(success=True, risk=RiskResponse.model_validate(risk))
     except Exception:
         return JSONResponse(
             status_code=500,
@@ -138,11 +160,11 @@ async def create_risk(body: dict):
         )
 
 
-@app.get("/risks")
+@app.get("/risks", response_model=list[RiskResponse])
 async def list_risks():
     with get_db() as db:
         risks = db.query(Risk).order_by(Risk.createdAt.desc()).all()
-        return [serialize_risk(risk) for risk in risks]
+        return [RiskResponse.model_validate(risk) for risk in risks]
 
 
 @app.get("/notifications")
