@@ -10,7 +10,7 @@ from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, cre
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from schemas.requests import CreateRiskRequest
-from schemas.responses import CreateRiskResponse, RiskResponse
+from schemas.responses import CreateRiskResponse, DismissNotificationResponse, RiskResponse
 
 load_dotenv()
 
@@ -136,7 +136,7 @@ async def create_risk(body: CreateRiskRequest):
     try:
         with get_db() as db:
             risk = Risk(
-                name=body.name,
+                name=body.title,
                 description=body.description,
                 category=body.category,
             )
@@ -171,9 +171,34 @@ async def list_risks():
 async def list_notifications():
     with get_db() as db:
         notifications = (
-            db.query(Notification).order_by(Notification.createdAt.desc()).all()
+            db.query(Notification)
+            .filter(Notification.viewed == False)
+            .order_by(Notification.createdAt.desc())
+            .all()
         )
         return [serialize_notification(notification) for notification in notifications]
+
+
+@app.put("/notifications/{id}/dismiss", response_model=DismissNotificationResponse)
+async def dismiss_notification(id: int):
+    try:
+        with get_db() as db:
+            notification = db.query(Notification).filter(Notification.id == id).first()
+            if not notification:
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "message": "Notification not found"},
+                )
+
+            notification.viewed = True
+            db.commit()
+
+            return DismissNotificationResponse(success=True)
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to dismiss notification"},
+        )
 
 
 if __name__ == "__main__":

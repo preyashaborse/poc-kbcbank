@@ -2,6 +2,6 @@ from pydantic import BaseModel
 
 
 class CreateRiskRequest(BaseModel):
-    name: str
+    title: str
     description: str
     category: list[str]
