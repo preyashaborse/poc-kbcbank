@@ -2,3 +2,8 @@ fastapi
 uvicorn[standard]
 python-dotenv
 sqlalchemy
+langchain
+langchain-openai
+langchain-community
+pypdf
+openai
