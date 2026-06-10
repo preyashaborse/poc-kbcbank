@@ -22,6 +22,33 @@ class DismissNotificationResponse(BaseModel):
     success: bool
 
 
+class RegulatoryChangeAlertResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    alertId: str
+    title: str
+    nativeTitle: str | None = None
+    category: str | None = None
+    webUrl: str | None = None
+    status: str | None = None
+    regulatoryPublicationAndOntology: str | None = None
+    ontology: str | None = None
+    nativeContent: str | None = None
+    classificationJurisdiction: str | None = None
+    classificationCategory: str | None = None
+    classificationApplicableJurisdictions: str | None = None
+    classificationRegulatoryBodies: str | None = None
+    keyDatesPublicationDate: str | None = None
+    keyDatesIssuanceDate: str | None = None
+    referenceIds: str | None = None
+    referencesLinkUrl: str | None = None
+    providedBy: str | None = None
+    providedOn: str | None = None
+    informationType: str | None = None
+    impactedPolicies: list[str]
+
+
 class PolicyImpact(BaseModel):
     policy_name: str
     rationale: str

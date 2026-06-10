@@ -11,6 +11,7 @@ from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, cre
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
+from data.regulatory_change_alerts_seed import REGULATORY_CHANGE_ALERTS_SEED
 from schemas.requests import AnalyzePolicyImpactRequest, CreateRiskRequest, PolicyGapAnalysisRequest
 from schemas.responses import (
     AnalyzePolicyImpactResponse,
@@ -18,6 +19,7 @@ from schemas.responses import (
     DismissNotificationResponse,
     PolicyGapAnalysisResponse,
     PolicyImpact,
+    RegulatoryChangeAlertResponse,
     RiskResponse,
     SectionGapAnalysis,
 )
@@ -175,6 +177,75 @@ class Notification(Base):
     )
 
 
+class RegulatoryChangeAlert(Base):
+    __tablename__ = "Regulatory Change Alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alertId: Mapped[str] = mapped_column("alertId", String, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    nativeTitle: Mapped[str | None] = mapped_column("nativeTitle", String, nullable=True)
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
+    webUrl: Mapped[str | None] = mapped_column("webUrl", String, nullable=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)
+    regulatoryPublicationAndOntology: Mapped[str | None] = mapped_column(
+        "regulatoryPublicationAndOntology", String, nullable=True
+    )
+    ontology: Mapped[str | None] = mapped_column(String, nullable=True)
+    nativeContent: Mapped[str | None] = mapped_column("nativeContent", String, nullable=True)
+    classificationJurisdiction: Mapped[str | None] = mapped_column(
+        "classificationJurisdiction", String, nullable=True
+    )
+    classificationCategory: Mapped[str | None] = mapped_column(
+        "classificationCategory", String, nullable=True
+    )
+    classificationApplicableJurisdictions: Mapped[str | None] = mapped_column(
+        "classificationApplicableJurisdictions", String, nullable=True
+    )
+    classificationRegulatoryBodies: Mapped[str | None] = mapped_column(
+        "classificationRegulatoryBodies", String, nullable=True
+    )
+    keyDatesPublicationDate: Mapped[str | None] = mapped_column(
+        "keyDatesPublicationDate", String, nullable=True
+    )
+    keyDatesIssuanceDate: Mapped[str | None] = mapped_column(
+        "keyDatesIssuanceDate", String, nullable=True
+    )
+    referenceIds: Mapped[str | None] = mapped_column("referenceIds", String, nullable=True)
+    referencesLinkUrl: Mapped[str | None] = mapped_column("referencesLinkUrl", String, nullable=True)
+    providedBy: Mapped[str | None] = mapped_column("providedBy", String, nullable=True)
+    providedOn: Mapped[str | None] = mapped_column("providedOn", String, nullable=True)
+    informationType: Mapped[str | None] = mapped_column("informationType", String, nullable=True)
+    impactedPolicies: Mapped[list] = mapped_column(
+        "impactedPolicies",
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    )
+
+
+def init_regulatory_change_alerts():
+    """Create Regulatory Change Alerts table and seed initial rows."""
+    try:
+        Base.metadata.create_all(bind=engine, tables=[RegulatoryChangeAlert.__table__])
+        with SessionLocal() as db:
+            for row in REGULATORY_CHANGE_ALERTS_SEED:
+                existing = (
+                    db.query(RegulatoryChangeAlert)
+                    .filter(RegulatoryChangeAlert.alertId == row["alertId"])
+                    .first()
+                )
+                if not existing:
+                    db.add(RegulatoryChangeAlert(**row))
+            db.commit()
+        logger.info("Regulatory Change Alerts table initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Regulatory Change Alerts: {e}", exc_info=True)
+        raise
+
+
+init_regulatory_change_alerts()
+
+
 @contextmanager
 def get_db():
     """Database session context manager with error handling."""
@@ -264,6 +335,29 @@ async def list_risks():
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": "Failed to fetch risks"},
+        )
+
+
+@app.get("/regulatory-change-alerts", response_model=list[RegulatoryChangeAlertResponse])
+async def list_regulatory_change_alerts():
+    """List all regulatory change alerts."""
+    try:
+        logger.debug("Fetching regulatory change alerts")
+        with get_db() as db:
+            alerts = db.query(RegulatoryChangeAlert).order_by(RegulatoryChangeAlert.id.asc()).all()
+            logger.info(f"Retrieved {len(alerts)} regulatory change alerts")
+            return [RegulatoryChangeAlertResponse.model_validate(alert) for alert in alerts]
+    except SQLAlchemyError as e:
+        logger.error(f"Database error fetching regulatory change alerts: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch regulatory change alerts"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching regulatory change alerts: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch regulatory change alerts"},
         )
 
 
