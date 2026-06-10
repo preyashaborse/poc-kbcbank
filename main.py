@@ -66,6 +66,12 @@ def migrate_risk_schema():
     try:
         logger.info("Starting database schema migration")
         with engine.connect() as conn:
+            if not conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name='Risk'")
+            ).fetchone():
+                logger.info("Risk table not found, skipping schema migration")
+                return
+
             columns = {
                 row[1]
                 for row in conn.execute(text("PRAGMA table_info(Risk)")).fetchall()
@@ -83,7 +89,7 @@ def migrate_risk_schema():
             if "category" not in columns:
                 logger.info("Migrating: Adding 'category' column")
                 conn.execute(
-                    text('ALTER TABLE "Risk" ADD COLUMN category JSON NOT NULL DEFAULT \'[]\'')
+                    text('ALTER TABLE "Risk" ADD COLUMN category TEXT NOT NULL DEFAULT \'\'')
                 )
 
             columns = {
@@ -107,7 +113,7 @@ def migrate_risk_schema():
                 logger.info("Migrating: Adding 'areasOfImpact' column")
                 conn.execute(
                     text(
-                        'ALTER TABLE "Risk" ADD COLUMN "areasOfImpact" JSON NOT NULL DEFAULT \'[]\''
+                        'ALTER TABLE "Risk" ADD COLUMN "areasOfImpact" TEXT NOT NULL DEFAULT \'\''
                     )
                 )
 
@@ -173,18 +179,18 @@ class Risk(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[list] = mapped_column(
-        JSON,
+    category: Mapped[str] = mapped_column(
+        String,
         nullable=False,
-        server_default=text("'[]'"),
+        server_default=text("''"),
     )
     level: Mapped[str] = mapped_column(String, nullable=False, server_default=text("''"))
     riskType: Mapped[str] = mapped_column("type", String, nullable=False, server_default=text("''"))
-    areasOfImpact: Mapped[list] = mapped_column(
+    areasOfImpact: Mapped[str] = mapped_column(
         "areasOfImpact",
-        JSON,
+        String,
         nullable=False,
-        server_default=text("'[]'"),
+        server_default=text("''"),
     )
     ownerOrganization: Mapped[str] = mapped_column(
         "ownerOrganization",
@@ -352,6 +358,86 @@ def migrate_risk_id_format():
 migrate_risk_id_format()
 
 
+def migrate_risk_list_fields_to_string():
+    """Migrate category and areasOfImpact from JSON arrays to TEXT strings."""
+    import json
+
+    def to_string(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return ", ".join(str(item) for item in parsed)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return value
+        return str(value)
+
+    try:
+        with engine.connect() as conn:
+            if not conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name='Risk'")
+            ).fetchone():
+                return
+
+            create_sql = conn.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='table' AND name='Risk'")
+            ).scalar() or ""
+
+            if "category JSON" not in create_sql and '"areasOfImpact" JSON' not in create_sql:
+                return
+
+            logger.info("Migrating Risk category and areasOfImpact from JSON to TEXT")
+            risks = conn.execute(text('SELECT * FROM "Risk"')).mappings().all()
+            notifications = conn.execute(text('SELECT * FROM "Notification"')).mappings().all()
+
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            conn.execute(text('DROP TABLE IF EXISTS "Notification"'))
+            conn.execute(text('DROP TABLE IF EXISTS "Risk"'))
+            conn.commit()
+
+        Base.metadata.create_all(bind=engine, tables=[Risk.__table__, Notification.__table__])
+
+        with SessionLocal() as db:
+            for row in risks:
+                db.add(
+                    Risk(
+                        id=row["id"],
+                        name=row["name"],
+                        description=row.get("description") or "",
+                        category=to_string(row.get("category")),
+                        level=row.get("level") or "",
+                        riskType=row.get("type") or "",
+                        areasOfImpact=to_string(row.get("areasOfImpact")),
+                        ownerOrganization=row.get("ownerOrganization") or "",
+                        createdAt=row.get("createdAt"),
+                    )
+                )
+            db.flush()
+            for row in notifications:
+                db.add(
+                    Notification(
+                        id=row["id"],
+                        riskId=row["riskId"],
+                        message=row["message"],
+                        viewed=row["viewed"],
+                        createdAt=row["createdAt"],
+                    )
+                )
+            db.commit()
+        logger.info("Risk JSON to TEXT migration completed successfully")
+    except Exception as e:
+        logger.error(f"Risk JSON to TEXT migration failed: {e}", exc_info=True)
+        raise
+
+
+migrate_risk_list_fields_to_string()
+
+
 def init_regulatory_change_alerts():
     """Create Regulatory Change Alerts table and seed initial rows."""
     try:
@@ -403,16 +489,18 @@ def serialize_notification(notification: Notification, risk_name: str) -> dict:
 async def create_risk(body: CreateRiskRequest):
     """Create a new risk and associated notification."""
     try:
-        logger.info(f"Creating new risk: {body.title}")
+        risk_name = (body.title or body.name).strip()
+        category_value = (body.category or body.categories or "").strip()
+        logger.info(f"Creating new risk: {risk_name}")
         with get_db() as db:
             risk = Risk(
                 id=generate_next_risk_id(db),
-                name=body.title,
-                description=body.description,
-                category=body.category,
+                name=risk_name,
+                description=body.description or "",
+                category=category_value,
                 level=body.level,
-                riskType=body.type,
-                areasOfImpact=body.areas_of_impact,
+                riskType=body.type or "",
+                areasOfImpact=body.areas_of_impact or "",
                 ownerOrganization=body.owner_organization,
             )
             db.add(risk)

@@ -9,10 +9,10 @@ class RiskResponse(BaseModel):
     id: str
     title: str = Field(validation_alias="name")
     description: str
-    category: list[str]
+    category: str
     level: str
     type: str = Field(validation_alias="riskType")
-    areas_of_impact: list[str] = Field(
+    areas_of_impact: str = Field(
         validation_alias="areasOfImpact", serialization_alias="areasOfImpact"
     )
     owner_organization: str = Field(

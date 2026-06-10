@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -5,11 +7,13 @@ class CreateRiskRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     title: str
-    description: str
-    category: list[str]
+    name: str
+    description: Optional[str] = ""
     level: str
-    type: str
-    areas_of_impact: list[str] = Field(alias="areasOfImpact")
+    category: str
+    categories: Optional[str] = ""
+    type: Optional[str] = ""
+    areas_of_impact: Optional[str] = Field(default="", alias="areasOfImpact")
     owner_organization: str = Field(alias="ownerOrganization")
 
 
