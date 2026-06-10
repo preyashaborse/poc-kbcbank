@@ -102,3 +102,18 @@ class PolicyGapAnalysisResponse(BaseModel):
     summary: dict = Field(
         description="Summary counts of coverage statuses"
     )
+
+
+class Obligation(BaseModel):
+    obligation_id: str
+    obligation_text: str
+    obligation_category: str
+    priority: str
+    rationale: str
+
+
+class ExtractObligationsResponse(BaseModel):
+    success: bool
+    alert_id: str
+    title: str
+    obligations: list[Obligation]

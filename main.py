@@ -17,7 +17,9 @@ from schemas.responses import (
     AnalyzePolicyImpactResponse,
     CreateRiskResponse,
     DismissNotificationResponse,
+    ExtractObligationsResponse,
     NotificationResponse,
+    Obligation,
     PolicyGapAnalysisResponse,
     PolicyImpact,
     RegulatoryChangeAlertResponse,
@@ -26,6 +28,7 @@ from schemas.responses import (
 )
 from services.policy_analyzer import PolicyAnalyzer
 from services.policy_gap_analyzer import PolicyGapAnalyzer
+from services.obligation_extractor import ObligationExtractor
 
 load_dotenv()
 
@@ -773,6 +776,104 @@ async def analyze_policy_gaps(body: PolicyGapAnalysisRequest):
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to analyze policy gaps: {str(e)}"},
+        )
+
+
+def build_regulatory_content(alert: RegulatoryChangeAlert) -> str:
+    """Concatenate all data fields of a regulatory change alert into one labelled text block."""
+    field_labels = [
+        ("Alert ID", alert.alertId),
+        ("Title", alert.title),
+        ("Native Title", alert.nativeTitle),
+        ("Category", alert.category),
+        ("Web URL", alert.webUrl),
+        ("Status", alert.status),
+        ("Regulatory Publication and Ontology", alert.regulatoryPublicationAndOntology),
+        ("Ontology", alert.ontology),
+        ("Native Content", alert.nativeContent),
+        ("Classification - Jurisdiction", alert.classificationJurisdiction),
+        ("Classification - Category", alert.classificationCategory),
+        ("Classification - Applicable Jurisdictions", alert.classificationApplicableJurisdictions),
+        ("Classification - Regulatory Bodies", alert.classificationRegulatoryBodies),
+        ("Key Dates - Publication Date", alert.keyDatesPublicationDate),
+        ("Key Dates - Issuance Date", alert.keyDatesIssuanceDate),
+        ("Reference IDs", alert.referenceIds),
+        ("References Link URL", alert.referencesLinkUrl),
+        ("Provided By", alert.providedBy),
+        ("Provided On", alert.providedOn),
+        ("Information Type", alert.informationType),
+    ]
+    return "\n".join(
+        f"{label}: {value}" for label, value in field_labels if value not in (None, "")
+    )
+
+
+@app.post(
+    "/regulatory-change-alerts/{alert_id}/extract-obligations",
+    response_model=ExtractObligationsResponse,
+)
+async def extract_obligations(alert_id: str):
+    """
+    Extract compliance obligations from a regulatory change alert's content using an LLM.
+    Takes all data fields of the given regulatory change alert and returns extracted obligations.
+    """
+    try:
+        logger.info(f"Starting obligation extraction for alert_id={alert_id}")
+        with get_db() as db:
+            alert = (
+                db.query(RegulatoryChangeAlert)
+                .filter(RegulatoryChangeAlert.alertId == alert_id)
+                .first()
+            )
+            if not alert:
+                logger.warning(f"Regulatory change alert not found: {alert_id}")
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "message": "Regulatory change alert not found"},
+                )
+
+            regulatory_content = build_regulatory_content(alert)
+            alert_title = alert.title
+
+        extractor = ObligationExtractor()
+        obligations = extractor.extract_obligations(regulatory_content)
+
+        logger.info(
+            f"Obligation extraction completed for alert_id={alert_id}, "
+            f"found {len(obligations)} obligations"
+        )
+        return ExtractObligationsResponse(
+            success=True,
+            alert_id=alert_id,
+            title=alert_title,
+            obligations=[
+                Obligation(
+                    obligation_id=o.obligation_id,
+                    obligation_text=o.obligation_text,
+                    obligation_category=o.obligation_category,
+                    priority=o.priority,
+                    rationale=o.rationale,
+                )
+                for o in obligations
+            ],
+        )
+    except ValueError as e:
+        logger.error(f"Validation error in obligation extraction: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in obligation extraction: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Database error occurred"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in obligation extraction: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to extract obligations: {str(e)}"},
         )
 
 
