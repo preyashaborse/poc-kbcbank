@@ -17,6 +17,7 @@ from schemas.responses import (
     AnalyzePolicyImpactResponse,
     CreateRiskResponse,
     DismissNotificationResponse,
+    NotificationResponse,
     PolicyGapAnalysisResponse,
     PolicyImpact,
     RegulatoryChangeAlertResponse,
@@ -84,6 +85,39 @@ def migrate_risk_schema():
                 conn.execute(
                     text('ALTER TABLE "Risk" ADD COLUMN category JSON NOT NULL DEFAULT \'[]\'')
                 )
+
+            columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(Risk)")).fetchall()
+            }
+
+            if "level" not in columns:
+                logger.info("Migrating: Adding 'level' column")
+                conn.execute(
+                    text('ALTER TABLE "Risk" ADD COLUMN level TEXT NOT NULL DEFAULT \'\'')
+                )
+
+            if "type" not in columns:
+                logger.info("Migrating: Adding 'type' column")
+                conn.execute(
+                    text('ALTER TABLE "Risk" ADD COLUMN type TEXT NOT NULL DEFAULT \'\'')
+                )
+
+            if "areasOfImpact" not in columns:
+                logger.info("Migrating: Adding 'areasOfImpact' column")
+                conn.execute(
+                    text(
+                        'ALTER TABLE "Risk" ADD COLUMN "areasOfImpact" JSON NOT NULL DEFAULT \'[]\''
+                    )
+                )
+
+            if "ownerOrganization" not in columns:
+                logger.info("Migrating: Adding 'ownerOrganization' column")
+                conn.execute(
+                    text(
+                        'ALTER TABLE "Risk" ADD COLUMN "ownerOrganization" TEXT NOT NULL DEFAULT \'\''
+                    )
+                )
             
             conn.commit()
             logger.info("Database schema migration completed successfully")
@@ -136,13 +170,27 @@ class Base(DeclarativeBase):
 class Risk(Base):
     __tablename__ = "Risk"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[list] = mapped_column(
         JSON,
         nullable=False,
         server_default=text("'[]'"),
+    )
+    level: Mapped[str] = mapped_column(String, nullable=False, server_default=text("''"))
+    riskType: Mapped[str] = mapped_column("type", String, nullable=False, server_default=text("''"))
+    areasOfImpact: Mapped[list] = mapped_column(
+        "areasOfImpact",
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    )
+    ownerOrganization: Mapped[str] = mapped_column(
+        "ownerOrganization",
+        String,
+        nullable=False,
+        server_default=text("''"),
     )
     createdAt: Mapped[datetime] = mapped_column(
         "createdAt",
@@ -156,9 +204,9 @@ class Notification(Base):
     __tablename__ = "Notification"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    riskId: Mapped[int] = mapped_column(
+    riskId: Mapped[str] = mapped_column(
         "riskId",
-        Integer,
+        String,
         ForeignKey("Risk.id", ondelete="RESTRICT", onupdate="CASCADE"),
         nullable=False,
     )
@@ -223,6 +271,87 @@ class RegulatoryChangeAlert(Base):
     )
 
 
+def generate_next_risk_id(db) -> str:
+    max_num = 0
+    for (risk_id,) in db.query(Risk.id).all():
+        if isinstance(risk_id, str) and risk_id.startswith("RISK-"):
+            try:
+                max_num = max(max_num, int(risk_id.removeprefix("RISK-")))
+            except ValueError:
+                pass
+    return f"RISK-{max_num + 1:03d}"
+
+
+def migrate_risk_id_format():
+    """Migrate Risk primary key from INTEGER to RISK-001 string format."""
+    try:
+        with engine.connect() as conn:
+            if not conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name='Risk'")
+            ).fetchone():
+                Base.metadata.create_all(bind=engine, tables=[Risk.__table__, Notification.__table__])
+                logger.info("Created Risk and Notification tables with string ids")
+                return
+
+            id_col = next(
+                (
+                    col
+                    for col in conn.execute(text('PRAGMA table_info("Risk")')).fetchall()
+                    if col[1] == "id"
+                ),
+                None,
+            )
+            if not id_col or id_col[2].upper() != "INTEGER":
+                return
+
+            logger.info("Migrating Risk id from INTEGER to RISK-XXX format")
+            risks = conn.execute(
+                text('SELECT id, name, description, category, "createdAt" FROM Risk ORDER BY id')
+            ).fetchall()
+            notifications = conn.execute(
+                text('SELECT id, riskId, message, viewed, "createdAt" FROM Notification')
+            ).fetchall()
+            id_map = {row[0]: f"RISK-{row[0]:03d}" for row in risks}
+
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            conn.execute(text('DROP TABLE IF EXISTS "Notification"'))
+            conn.execute(text('DROP TABLE IF EXISTS "Risk"'))
+            conn.commit()
+
+        Base.metadata.create_all(bind=engine, tables=[Risk.__table__, Notification.__table__])
+
+        with SessionLocal() as db:
+            for old_id, name, description, category, created_at in risks:
+                db.add(
+                    Risk(
+                        id=id_map[old_id],
+                        name=name,
+                        description=description,
+                        category=category,
+                        createdAt=created_at,
+                    )
+                )
+            db.flush()
+            for notif_id, risk_id, message, viewed, created_at in notifications:
+                db.add(
+                    Notification(
+                        id=notif_id,
+                        riskId=id_map[risk_id],
+                        message=message,
+                        viewed=viewed,
+                        createdAt=created_at,
+                    )
+                )
+            db.commit()
+        logger.info("Risk id migration completed successfully")
+    except Exception as e:
+        logger.error(f"Risk id migration failed: {e}", exc_info=True)
+        raise
+
+
+migrate_risk_id_format()
+
+
 def init_regulatory_change_alerts():
     """Create Regulatory Change Alerts table and seed initial rows."""
     try:
@@ -260,14 +389,14 @@ def get_db():
         db.close()
 
 
-def serialize_notification(notification: Notification) -> dict:
-    return {
-        "id": notification.id,
-        "riskId": notification.riskId,
-        "message": notification.message,
-        "viewed": notification.viewed,
-        "createdAt": notification.createdAt.isoformat().replace("+00:00", "Z"),
-    }
+def serialize_notification(notification: Notification, risk_name: str) -> dict:
+    return NotificationResponse(
+        id=notification.id,
+        riskId=notification.riskId,
+        title=risk_name,
+        viewed=notification.viewed,
+        createdAt=notification.createdAt,
+    ).model_dump(mode="json", by_alias=True)
 
 
 @app.post("/risks", response_model=CreateRiskResponse)
@@ -277,9 +406,14 @@ async def create_risk(body: CreateRiskRequest):
         logger.info(f"Creating new risk: {body.title}")
         with get_db() as db:
             risk = Risk(
+                id=generate_next_risk_id(db),
                 name=body.title,
                 description=body.description,
                 category=body.category,
+                level=body.level,
+                riskType=body.type,
+                areasOfImpact=body.areas_of_impact,
+                ownerOrganization=body.owner_organization,
             )
             db.add(risk)
             db.flush()
@@ -361,20 +495,24 @@ async def list_regulatory_change_alerts():
         )
 
 
-@app.get("/notifications")
+@app.get("/notifications", response_model=list[NotificationResponse])
 async def list_notifications():
     """List all unviewed notifications."""
     try:
         logger.debug("Fetching unviewed notifications")
         with get_db() as db:
-            notifications = (
-                db.query(Notification)
+            rows = (
+                db.query(Notification, Risk.name)
+                .join(Risk, Notification.riskId == Risk.id)
                 .filter(Notification.viewed == False)
                 .order_by(Notification.createdAt.desc())
                 .all()
             )
-            logger.info(f"Retrieved {len(notifications)} unviewed notifications")
-            return [serialize_notification(notification) for notification in notifications]
+            logger.info(f"Retrieved {len(rows)} unviewed notifications")
+            return [
+                serialize_notification(notification, risk_name)
+                for notification, risk_name in rows
+            ]
     except SQLAlchemyError as e:
         logger.error(f"Database error fetching notifications: {e}", exc_info=True)
         return JSONResponse(

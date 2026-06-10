@@ -6,11 +6,27 @@ from pydantic import BaseModel, ConfigDict, Field
 class RiskResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
-    id: int
+    id: str
     title: str = Field(validation_alias="name")
     description: str
     category: list[str]
+    level: str
+    type: str = Field(validation_alias="riskType")
+    areas_of_impact: list[str] = Field(
+        validation_alias="areasOfImpact", serialization_alias="areasOfImpact"
+    )
+    owner_organization: str = Field(
+        validation_alias="ownerOrganization", serialization_alias="ownerOrganization"
+    )
     createdAt: datetime = Field(description="Read-only, set by the database")
+
+
+class NotificationResponse(BaseModel):
+    id: int
+    riskId: str
+    title: str
+    viewed: bool
+    createdAt: datetime
 
 
 class CreateRiskResponse(BaseModel):
@@ -57,7 +73,7 @@ class PolicyImpact(BaseModel):
 
 class AnalyzePolicyImpactResponse(BaseModel):
     success: bool
-    risk_id: int
+    risk_id: str
     risk_title: str
     impacted_policies: list[PolicyImpact]
 
@@ -79,7 +95,7 @@ class SectionGapAnalysis(BaseModel):
 
 class PolicyGapAnalysisResponse(BaseModel):
     success: bool
-    risk_id: int
+    risk_id: str
     risk_title: str
     policy_name: str
     section_analyses: list[SectionGapAnalysis]
