@@ -39,6 +39,14 @@ class SectionCoverageAnalysis(BaseModel):
         default="",
         description="Drafted policy section text to address gaps (only for Partially Covered or Missing)"
     )
+    recommended_rationale: str = Field(
+        default="",
+        description="Rationale explaining why the recommended section addresses the identified gaps"
+    )
+    confidence_score: float = Field(
+        default=0.0,
+        description="Confidence score (0 to 100%) indicating the LLM's confidence in the analysis and recommendation"
+    )
 
 
 class PolicyGapAnalyzer:
@@ -241,6 +249,11 @@ For **Partially Covered** or **Missing** sections:
 - Include specific, actionable requirements
 - Reference relevant regulatory frameworks where applicable
 - Format as a complete policy section with clear requirements
+- Provide a clear rationale explaining why this recommendation addresses the gaps
+- Assign a confidence score (0 to 100%) based on:
+  * Clarity of the gap identified (30%)
+  * Relevance of the recommendation to the risk (40%)
+  * Completeness of the proposed solution (30%)
 
 {format_instructions}"""),
             ("user", """Policy Name: {policy_name}
@@ -255,7 +268,10 @@ Risk Description: {risk_description}
 Analyze this section's coverage of the risk and provide:
 1. Coverage status (Fully Covered, Partially Covered, Missing, or No Impact)
 2. Detailed gap analysis
-3. If Partially Covered or Missing, draft a new policy section to address the gaps""")
+3. If Partially Covered or Missing:
+   - Draft a new policy section to address the gaps
+   - Provide a rationale explaining why this recommendation addresses the identified gaps
+   - Assign a confidence score (0.0 to 1.0) reflecting your confidence in the analysis and recommendation""")
         ])
         
         chain = prompt | self.llm | parser
@@ -282,7 +298,9 @@ Analyze this section's coverage of the risk and provide:
                 section_title=section.section_title,
                 coverage_status="No Impact",
                 gap_analysis=f"Analysis failed due to validation error: {str(e)}",
-                recommended_section=""
+                recommended_section="",
+                recommended_rationale="",
+                confidence_score=0.0
             )
         except Exception as e:
             logger.error(f"Error analyzing section {section.section_number}: {e}", exc_info=True)
@@ -291,7 +309,9 @@ Analyze this section's coverage of the risk and provide:
                 section_title=section.section_title,
                 coverage_status="No Impact",
                 gap_analysis=f"Analysis failed: {str(e)}",
-                recommended_section=""
+                recommended_section="",
+                recommended_rationale="",
+                confidence_score=0.0
             )
     
     def analyze_policy_gaps(
