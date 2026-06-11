@@ -117,6 +117,26 @@ class PolicyResponse(BaseModel):
     risk_level: str | None = None
 
 
+class PolicyDocumentReference(BaseModel):
+    url: str
+
+
+class PolicyDocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    documentName: str
+    documentType: str | None = None
+    approvalType: str | None = None
+    category: str | None = None
+    description: str | None = None
+    effectiveFrom: str | None = None
+    template: str | None = None
+    references: list[PolicyDocumentReference] = []
+    controls: list[str] = []
+    relatedRisks: list[str] = []
+
+
 class Obligation(BaseModel):
     obligation_id: str
     obligation_text: str

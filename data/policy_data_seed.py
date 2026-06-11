@@ -67,7 +67,7 @@ Senior Manager: An employee at or above the grade designated as Senior Manager i
         "controls": [
             "CTR-001-Pre-Travel Approval Gate (EUR 800 Threshold): Automated block in KATE and KBC Travel Portal prevents booking confirmation for trips where estimated total cost exceeds EUR 800 without line manager approval recorded in the workflow."
         ],
-        "risks": [
+        "relatedRisks": [
             "RTR-001-Unapproved Business Travel Expenditure-Belgian employees incur business travel costs without obtaining required pre-approval, resulting in financial exposure and audit findings. Risk is heightened by KATE's automated booking capability which may bypass line manager approval workflows.",
         ],
     }

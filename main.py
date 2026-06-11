@@ -28,6 +28,7 @@ from schemas.responses import (
     ExtractObligationsResponse,
     NotificationResponse,
     Obligation,
+    PolicyDocumentResponse,
     PolicyResponse,
     PolicyGapAnalysisResponse,
     PolicyImpact,
@@ -306,6 +307,50 @@ class Policy(Base):
     risk_level: Mapped[str | None] = mapped_column("risk_level", String, nullable=True)
 
 
+class PolicyDocument(Base):
+    __tablename__ = "PolicyDocument"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    documentName: Mapped[str] = mapped_column("documentName", String, nullable=False, unique=True)
+    documentType: Mapped[str | None] = mapped_column("documentType", String, nullable=True)
+    approvalType: Mapped[str | None] = mapped_column("approvalType", String, nullable=True)
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
+    effectiveFrom: Mapped[str | None] = mapped_column("effectiveFrom", String, nullable=True)
+    template: Mapped[str | None] = mapped_column(String, nullable=True)
+    references: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    )
+    controls: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    )
+    relatedRisks: Mapped[list] = mapped_column(
+        "relatedRisks",
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    )
+
+
+def policy_document_to_dict(document: PolicyDocument) -> dict:
+    return {
+        "documentName": document.documentName,
+        "documentType": document.documentType or "",
+        "approvalType": document.approvalType or "",
+        "category": document.category or "",
+        "description": document.description or "",
+        "effectiveFrom": document.effectiveFrom or "",
+        "template": document.template or "",
+        "controls": document.controls or [],
+        "relatedRisks": document.relatedRisks or [],
+        "references": document.references or [],
+    }
+
+
 def generate_next_risk_id(db) -> str:
     max_num = 0
     for (risk_id,) in db.query(Risk.id).all():
@@ -513,6 +558,29 @@ def init_policies():
 init_policies()
 
 
+def init_policy_documents():
+    """Create PolicyDocument table and seed initial rows."""
+    try:
+        Base.metadata.create_all(bind=engine, tables=[PolicyDocument.__table__])
+        with SessionLocal() as db:
+            for row in POLICY_DATA_SEED:
+                existing = (
+                    db.query(PolicyDocument)
+                    .filter(PolicyDocument.documentName == row["documentName"])
+                    .first()
+                )
+                if not existing:
+                    db.add(PolicyDocument(**row))
+            db.commit()
+        logger.info("PolicyDocument table initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize PolicyDocument table: {e}", exc_info=True)
+        raise
+
+
+init_policy_documents()
+
+
 @contextmanager
 def get_db():
     """Database session context manager with error handling."""
@@ -655,6 +723,62 @@ async def list_policies():
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": "Failed to fetch policies"},
+        )
+
+
+@app.get("/policy-data", response_model=list[PolicyDocumentResponse])
+async def list_policy_documents():
+    """List all policy documents (full content from PolicyDocument table)."""
+    try:
+        logger.debug("Fetching policy documents")
+        with get_db() as db:
+            documents = db.query(PolicyDocument).order_by(PolicyDocument.id.asc()).all()
+            logger.info(f"Retrieved {len(documents)} policy documents")
+            return [PolicyDocumentResponse.model_validate(doc) for doc in documents]
+    except SQLAlchemyError as e:
+        logger.error(f"Database error fetching policy documents: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch policy documents"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching policy documents: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch policy documents"},
+        )
+
+
+@app.get("/policy-data/{document_name}", response_model=PolicyDocumentResponse)
+async def get_policy_document(document_name: str):
+    """Get a single policy document by documentName."""
+    try:
+        logger.debug(f"Fetching policy document: {document_name}")
+        with get_db() as db:
+            document = (
+                db.query(PolicyDocument)
+                .filter(PolicyDocument.documentName == document_name)
+                .first()
+            )
+            if not document:
+                logger.warning(f"Policy document not found: {document_name}")
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "message": "Policy document not found"},
+                )
+            logger.info(f"Retrieved policy document: {document_name}")
+            return PolicyDocumentResponse.model_validate(document)
+    except SQLAlchemyError as e:
+        logger.error(f"Database error fetching policy document: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch policy document"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching policy document: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch policy document"},
         )
 
 
@@ -1077,9 +1201,9 @@ async def analyze_linked_policy(body: AnalyzeLinkedPolicyRequest):
 @app.post("/review-analysis/{document_name}", response_model=ReviewAnalysisResponse)
 async def review_analysis(document_name: str):
     """
-    Perform comprehensive policy review analysis using seed data.
+    Perform comprehensive policy review analysis using policy document data from the database.
     
-    Takes only a documentName as path parameter and fetches the policy data from POLICY_DATA_SEED.
+    Takes only a documentName as path parameter and fetches the policy data from PolicyDocument.
     
     Scans the policy for:
     - CONFLICT: Blocking severity issues where provisions cannot coexist
@@ -1092,34 +1216,22 @@ async def review_analysis(document_name: str):
     """
     try:
         logger.info(f"Starting review analysis for document_name: {document_name}")
-        
-        policy_data = None
-        for policy in POLICY_DATA_SEED:
-            if policy.get("documentName") == document_name:
-                policy_data = policy
-                break
-        
-        if not policy_data:
-            logger.warning(f"Policy data not found for document_name: {document_name}")
-            return JSONResponse(
-                status_code=404,
-                content={"success": False, "message": f"Policy data not found for document_name: {document_name}"},
+
+        with get_db() as db:
+            policy_document = (
+                db.query(PolicyDocument)
+                .filter(PolicyDocument.documentName == document_name)
+                .first()
             )
-        
+            if not policy_document:
+                logger.warning(f"Policy data not found for document_name: {document_name}")
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "message": f"Policy data not found for document_name: {document_name}"},
+                )
+            policy_dict = policy_document_to_dict(policy_document)
+
         analyzer = PolicyReviewAnalyzer()
-        policy_dict = {
-            "documentName": policy_data.get("documentName", ""),
-            "documentType": policy_data.get("documentType", ""),
-            "approvalType": policy_data.get("approvalType", ""),
-            "category": policy_data.get("category", ""),
-            "description": policy_data.get("description", ""),
-            "effectiveFrom": policy_data.get("effectiveFrom", ""),
-            "template": policy_data.get("template", ""),
-            "controls": policy_data.get("controls", []),
-            "relatedRisks": policy_data.get("relatedRisks", []),
-            "references": policy_data.get("references", [])
-        }
-        
         result = await analyzer.analyze_policy(policy_dict)
         
         if not result.get("success"):
@@ -1129,7 +1241,7 @@ async def review_analysis(document_name: str):
                 content={"success": False, "message": result.get("error", "Analysis failed")},
             )
         
-        logger.info(f"Review analysis completed for {policy_data.get('documentName')}. Found {result['summary']['total_findings']} findings.")
+        logger.info(f"Review analysis completed for {policy_dict['documentName']}. Found {result['summary']['total_findings']} findings.")
         return ReviewAnalysisResponse(**result)
         
     except ValueError as e:
