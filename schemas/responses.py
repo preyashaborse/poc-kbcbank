@@ -104,6 +104,19 @@ class PolicyGapAnalysisResponse(BaseModel):
     )
 
 
+class PolicyResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    policy_id: str
+    policy_title: str
+    business_line: str | None = None
+    policy_owner: str | None = None
+    version: str | None = None
+    status: str | None = None
+    risk_level: str | None = None
+
+
 class Obligation(BaseModel):
     obligation_id: str
     obligation_text: str
@@ -117,3 +130,18 @@ class ExtractObligationsResponse(BaseModel):
     alert_id: str
     title: str
     obligations: list[Obligation]
+
+
+class RankedPolicy(BaseModel):
+    policy_id: str
+    policy_title: str
+    relevance_score: float
+    rationale: str
+    matched_obligations: list[str] = []
+
+
+class AnalyzeLinkedPolicyResponse(BaseModel):
+    success: bool
+    alert_id: str | None = None
+    obligations: list[Obligation]
+    ranked_policies: list[RankedPolicy]

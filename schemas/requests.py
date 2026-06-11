@@ -28,3 +28,9 @@ class PolicyGapAnalysisRequest(BaseModel):
     risk_title: str
     risk_description: str
     policy_name: str
+
+
+class AnalyzeLinkedPolicyRequest(BaseModel):
+    alertId: Optional[str] = None
+    regulatoryContent: Optional[str] = None
+    obligations: Optional[list[dict]] = None

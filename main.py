@@ -12,16 +12,25 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from data.regulatory_change_alerts_seed import REGULATORY_CHANGE_ALERTS_SEED
-from schemas.requests import AnalyzePolicyImpactRequest, CreateRiskRequest, PolicyGapAnalysisRequest
+from data.policy_seed import POLICY_SEED
+from schemas.requests import (
+    AnalyzeLinkedPolicyRequest,
+    AnalyzePolicyImpactRequest,
+    CreateRiskRequest,
+    PolicyGapAnalysisRequest,
+)
 from schemas.responses import (
+    AnalyzeLinkedPolicyResponse,
     AnalyzePolicyImpactResponse,
     CreateRiskResponse,
     DismissNotificationResponse,
     ExtractObligationsResponse,
     NotificationResponse,
     Obligation,
+    PolicyResponse,
     PolicyGapAnalysisResponse,
     PolicyImpact,
+    RankedPolicy,
     RegulatoryChangeAlertResponse,
     RiskResponse,
     SectionGapAnalysis,
@@ -29,6 +38,7 @@ from schemas.responses import (
 from services.policy_analyzer import PolicyAnalyzer
 from services.policy_gap_analyzer import PolicyGapAnalyzer
 from services.obligation_extractor import ObligationExtractor
+from services.linked_policy_analyzer import LinkedPolicyAnalyzer
 
 load_dotenv()
 
@@ -280,6 +290,19 @@ class RegulatoryChangeAlert(Base):
     )
 
 
+class Policy(Base):
+    __tablename__ = "Policy"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    policy_id: Mapped[str] = mapped_column("policy_id", String, nullable=False, unique=True)
+    policy_title: Mapped[str] = mapped_column("policy_title", String, nullable=False)
+    business_line: Mapped[str | None] = mapped_column("business_line", String, nullable=True)
+    policy_owner: Mapped[str | None] = mapped_column("policy_owner", String, nullable=True)
+    version: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)
+    risk_level: Mapped[str | None] = mapped_column("risk_level", String, nullable=True)
+
+
 def generate_next_risk_id(db) -> str:
     max_num = 0
     for (risk_id,) in db.query(Risk.id).all():
@@ -464,6 +487,29 @@ def init_regulatory_change_alerts():
 init_regulatory_change_alerts()
 
 
+def init_policies():
+    """Create Policy table and seed initial rows."""
+    try:
+        Base.metadata.create_all(bind=engine, tables=[Policy.__table__])
+        with SessionLocal() as db:
+            for row in POLICY_SEED:
+                existing = (
+                    db.query(Policy)
+                    .filter(Policy.policy_id == row["policy_id"])
+                    .first()
+                )
+                if not existing:
+                    db.add(Policy(**row))
+            db.commit()
+        logger.info("Policy table initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Policy table: {e}", exc_info=True)
+        raise
+
+
+init_policies()
+
+
 @contextmanager
 def get_db():
     """Database session context manager with error handling."""
@@ -583,6 +629,29 @@ async def list_regulatory_change_alerts():
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": "Failed to fetch regulatory change alerts"},
+        )
+
+
+@app.get("/policies", response_model=list[PolicyResponse])
+async def list_policies():
+    """List all policies."""
+    try:
+        logger.debug("Fetching policies")
+        with get_db() as db:
+            policies = db.query(Policy).order_by(Policy.policy_id.asc()).all()
+            logger.info(f"Retrieved {len(policies)} policies")
+            return [PolicyResponse.model_validate(policy) for policy in policies]
+    except SQLAlchemyError as e:
+        logger.error(f"Database error fetching policies: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch policies"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching policies: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to fetch policies"},
         )
 
 
@@ -874,6 +943,131 @@ async def extract_obligations(alert_id: str):
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to extract obligations: {str(e)}"},
+        )
+
+
+@app.post("/analyze-linked-policy", response_model=AnalyzeLinkedPolicyResponse)
+async def analyze_linked_policy(body: AnalyzeLinkedPolicyRequest):
+    """
+    Analyze which existing policies are most linked to a regulatory change.
+
+    Flow: regulatory alert -> extract obligations -> load policies from DB ->
+    LLM compares regulation against policies -> return ranked policies.
+
+    Accepts either:
+      - {"alertId": "RC-001"} (content + obligations derived from the DB), or
+      - {"regulatoryContent": "...", "obligations": [...]} (provided directly).
+    """
+    try:
+        if not body.alertId and not body.regulatoryContent:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "Provide either 'alertId' or 'regulatoryContent'",
+                },
+            )
+
+        alert_id = body.alertId
+        regulatory_content = body.regulatoryContent or ""
+
+        if body.alertId:
+            with get_db() as db:
+                alert = (
+                    db.query(RegulatoryChangeAlert)
+                    .filter(RegulatoryChangeAlert.alertId == body.alertId)
+                    .first()
+                )
+                if not alert:
+                    logger.warning(f"Regulatory change alert not found: {body.alertId}")
+                    return JSONResponse(
+                        status_code=404,
+                        content={"success": False, "message": "Regulatory change alert not found"},
+                    )
+                regulatory_content = build_regulatory_content(alert)
+
+        obligations: list[dict] = body.obligations or []
+
+        if not obligations:
+            logger.info("No obligations supplied, extracting from regulatory content")
+            extractor = ObligationExtractor()
+            extracted = extractor.extract_obligations(regulatory_content)
+            obligations = [o.model_dump() for o in extracted]
+
+        with get_db() as db:
+            policies = db.query(Policy).order_by(Policy.policy_id.asc()).all()
+            policy_dicts = [
+                {
+                    "policy_id": p.policy_id,
+                    "policy_title": p.policy_title,
+                    "business_line": p.business_line,
+                    "policy_owner": p.policy_owner,
+                    "version": p.version,
+                    "status": p.status,
+                    "risk_level": p.risk_level,
+                }
+                for p in policies
+            ]
+
+        if not policy_dicts:
+            logger.warning("No policies found in database to rank")
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "No policies found in database"},
+            )
+
+        analyzer = LinkedPolicyAnalyzer()
+        ranked = analyzer.rank_policies(
+            regulatory_content=regulatory_content,
+            obligations=obligations,
+            policies=policy_dicts,
+        )
+
+        logger.info(
+            f"Linked policy analysis completed for alert_id={alert_id}, "
+            f"ranked {len(ranked)} policies"
+        )
+        return AnalyzeLinkedPolicyResponse(
+            success=True,
+            alert_id=alert_id,
+            obligations=[
+                Obligation(
+                    obligation_id=o.get("obligation_id", ""),
+                    obligation_text=o.get("obligation_text", ""),
+                    obligation_category=o.get("obligation_category", ""),
+                    priority=o.get("priority", ""),
+                    rationale=o.get("rationale", ""),
+                )
+                for o in obligations
+            ],
+            ranked_policies=[
+                RankedPolicy(
+                    policy_id=r.policy_id,
+                    policy_title=r.policy_title,
+                    relevance_score=r.relevance_score,
+                    rationale=r.rationale,
+                    matched_obligations=r.matched_obligations,
+                )
+                for r in ranked
+            ],
+        )
+    except ValueError as e:
+        logger.error(f"Validation error in linked policy analysis: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in linked policy analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Database error occurred"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in linked policy analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to analyze linked policy: {str(e)}"},
         )
 
 
