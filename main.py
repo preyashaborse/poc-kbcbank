@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from data.regulatory_change_alerts_seed import REGULATORY_CHANGE_ALERTS_SEED
 from data.policy_seed import POLICY_SEED
+from data.policy_data_seed import POLICY_DATA_SEED
 from schemas.requests import (
     AnalyzeLinkedPolicyRequest,
     AnalyzePolicyImpactRequest,
@@ -32,6 +33,7 @@ from schemas.responses import (
     PolicyImpact,
     RankedPolicy,
     RegulatoryChangeAlertResponse,
+    ReviewAnalysisResponse,
     RiskResponse,
     SectionGapAnalysis,
 )
@@ -39,6 +41,7 @@ from services.policy_analyzer import PolicyAnalyzer
 from services.policy_gap_analyzer import PolicyGapAnalyzer
 from services.obligation_extractor import ObligationExtractor
 from services.linked_policy_analyzer import LinkedPolicyAnalyzer
+from services.policy_review_analyzer import PolicyReviewAnalyzer
 
 load_dotenv()
 
@@ -1068,6 +1071,78 @@ async def analyze_linked_policy(body: AnalyzeLinkedPolicyRequest):
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to analyze linked policy: {str(e)}"},
+        )
+
+
+@app.post("/review-analysis/{document_name}", response_model=ReviewAnalysisResponse)
+async def review_analysis(document_name: str):
+    """
+    Perform comprehensive policy review analysis using seed data.
+    
+    Takes only a documentName as path parameter and fetches the policy data from POLICY_DATA_SEED.
+    
+    Scans the policy for:
+    - CONFLICT: Blocking severity issues where provisions cannot coexist
+    - INCONSISTENCY: Non-blocking ambiguities or procedural confusion
+    - BLIND_SPOT: Advisory gaps in policy coverage
+    - CONTROL & RISK analysis: Enforceability and mitigation status
+    
+    Fetches and analyzes referenced documents. Produces structured findings
+    with exact section citations and confidence scores.
+    """
+    try:
+        logger.info(f"Starting review analysis for document_name: {document_name}")
+        
+        policy_data = None
+        for policy in POLICY_DATA_SEED:
+            if policy.get("documentName") == document_name:
+                policy_data = policy
+                break
+        
+        if not policy_data:
+            logger.warning(f"Policy data not found for document_name: {document_name}")
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": f"Policy data not found for document_name: {document_name}"},
+            )
+        
+        analyzer = PolicyReviewAnalyzer()
+        policy_dict = {
+            "documentName": policy_data.get("documentName", ""),
+            "documentType": policy_data.get("documentType", ""),
+            "approvalType": policy_data.get("approvalType", ""),
+            "category": policy_data.get("category", ""),
+            "description": policy_data.get("description", ""),
+            "effectiveFrom": policy_data.get("effectiveFrom", ""),
+            "template": policy_data.get("template", ""),
+            "controls": policy_data.get("controls", []),
+            "relatedRisks": policy_data.get("relatedRisks", []),
+            "references": policy_data.get("references", [])
+        }
+        
+        result = await analyzer.analyze_policy(policy_dict)
+        
+        if not result.get("success"):
+            logger.error(f"Policy analysis failed: {result.get('error')}")
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": result.get("error", "Analysis failed")},
+            )
+        
+        logger.info(f"Review analysis completed for {policy_data.get('documentName')}. Found {result['summary']['total_findings']} findings.")
+        return ReviewAnalysisResponse(**result)
+        
+    except ValueError as e:
+        logger.error(f"Validation error in review analysis: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in review analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to perform review analysis: {str(e)}"},
         )
 
 

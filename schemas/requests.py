@@ -34,3 +34,7 @@ class AnalyzeLinkedPolicyRequest(BaseModel):
     alertId: Optional[str] = None
     regulatoryContent: Optional[str] = None
     obligations: Optional[list[dict]] = None
+
+
+
+

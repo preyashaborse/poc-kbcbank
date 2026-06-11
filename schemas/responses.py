@@ -145,3 +145,47 @@ class AnalyzeLinkedPolicyResponse(BaseModel):
     alert_id: str | None = None
     obligations: list[Obligation]
     ranked_policies: list[RankedPolicy]
+
+
+class Finding(BaseModel):
+    finding_id: str
+    finding_type: str = Field(description="CONFLICT, INCONSISTENCY, BLIND_SPOT, or CONTROL_RISK")
+    severity: str = Field(description="Blocking, Non-Blocking, or Advisory")
+    title: str
+    description: str
+    affected_sections: list[str] = Field(description="Section numbers/references affected")
+    cited_excerpts: list[str] = Field(description="Verbatim excerpts from policy")
+    confidence_score: float = Field(ge=0, le=100, description="Confidence score 0-100%")
+    confidence_reason: str = Field(description="One-line reason for confidence score")
+    cross_document_refs: list[str] = Field(default=[], description="References to other documents")
+    remediation_notes: str = Field(default="", description="Policy owner notes, not recommendations")
+
+
+class ControlAnalysis(BaseModel):
+    control_id: str
+    control_text: str
+    status: str = Field(description="Enforceable, Partially Enforceable, or Unenforceable")
+    linked_findings: list[str] = Field(description="Finding IDs that affect this control")
+    notes: str
+
+
+class RiskAnalysis(BaseModel):
+    risk_id: str
+    risk_text: str
+    status: str = Field(description="Mitigated, Partially Mitigated, or Unmitigated")
+    policy_coverage: str = Field(description="Fully Covered, Partially Covered, or Uncovered")
+    linked_findings: list[str] = Field(description="Finding IDs related to this risk")
+    notes: str
+
+
+class ReviewAnalysisResponse(BaseModel):
+    success: bool
+    document_name: str
+    document_id: str
+    document_version: str
+    analysis_timestamp: datetime
+    findings: list[Finding]
+    control_analysis: list[ControlAnalysis]
+    risk_analysis: list[RiskAnalysis]
+    summary: dict = Field(description="Summary counts by finding type and severity")
+    overall_compliance_status: str = Field(description="Compliant, Compliant with Exceptions, or Non-Compliant")
