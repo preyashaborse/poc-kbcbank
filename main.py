@@ -20,6 +20,7 @@ from schemas.requests import (
     CreateRiskRequest,
     ExtractObligationsRequest,
     PolicyGapAnalysisRequest,
+    RegulatoryPolicyGapAnalysisRequest,
 )
 from schemas.responses import (
     AnalyzeLinkedPolicyResponse,
@@ -35,6 +36,8 @@ from schemas.responses import (
     PolicyImpact,
     RankedPolicy,
     RegulatoryChangeAlertResponse,
+    RegulatoryPolicyGapAnalysisResponse,
+    RegulatorySectionGapAnalysis,
     ReviewAnalysisResponse,
     RiskResponse,
     SectionGapAnalysis,
@@ -43,6 +46,7 @@ from services.policy_analyzer import PolicyAnalyzer
 from services.policy_gap_analyzer import PolicyGapAnalyzer
 from services.obligation_extractor import ObligationExtractor
 from services.linked_policy_analyzer import LinkedPolicyAnalyzer
+from services.regulatory_policy_gap_analyzer import RegulatoryPolicyGapAnalyzer
 from services.policy_review_analyzer import PolicyReviewAnalyzer
 
 load_dotenv()
@@ -976,6 +980,14 @@ async def analyze_policy_gaps(body: PolicyGapAnalysisRequest):
         )
 
 
+def resolve_policy_name(db, policy_name: str) -> str:
+    """Resolve POL-xxx policy id to policy title for PDF lookup."""
+    policy = db.query(Policy).filter(Policy.policy_id == policy_name).first()
+    if policy:
+        return policy.policy_title
+    return policy_name
+
+
 def build_regulatory_content(alert: RegulatoryChangeAlert) -> str:
     """Concatenate all data fields of a regulatory change alert into one labelled text block."""
     field_labels = [
@@ -1089,6 +1101,114 @@ async def extract_obligations(
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to extract obligations: {str(e)}"},
+        )
+
+
+@app.post(
+    "/regulatory-change-alerts/{alert_id}/gap-analysis",
+    response_model=RegulatoryPolicyGapAnalysisResponse,
+)
+async def analyze_regulatory_policy_gaps(
+    alert_id: str,
+    body: RegulatoryPolicyGapAnalysisRequest,
+):
+    """
+    Section-level gap analysis for a specific policy against a regulatory alert's obligations.
+
+    Loads the regulatory alert, uses provided or extracted obligations, parses the policy PDF
+    into sections, and classifies each section as Fully/Partially/Missing/No Impact.
+    """
+    try:
+        logger.info(
+            f"Starting regulatory gap analysis for alert_id={alert_id}, "
+            f"policy_name={body.policy_name}"
+        )
+        with get_db() as db:
+            alert = (
+                db.query(RegulatoryChangeAlert)
+                .filter(RegulatoryChangeAlert.alertId == alert_id)
+                .first()
+            )
+            if not alert:
+                logger.warning(f"Regulatory change alert not found: {alert_id}")
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "message": "Regulatory change alert not found"},
+                )
+
+            regulatory_content = append_uploaded_document_text(
+                build_regulatory_content(alert),
+                body.extracted_document_text,
+            )
+            alert_title = alert.title
+            resolved_policy_name = resolve_policy_name(db, body.policy_name)
+
+        obligations: list[dict] = body.obligations or []
+        if not obligations:
+            logger.info("No obligations supplied, extracting from regulatory content")
+            extractor = ObligationExtractor()
+            extracted = extractor.extract_obligations(regulatory_content)
+            obligations = [o.model_dump() for o in extracted]
+
+        gap_analyzer = RegulatoryPolicyGapAnalyzer()
+        result = gap_analyzer.analyze_regulatory_policy_gaps(
+            alert_title=alert_title,
+            regulatory_content=regulatory_content,
+            obligations=obligations,
+            policy_name=resolved_policy_name,
+        )
+
+        section_analyses = [
+            RegulatorySectionGapAnalysis(
+                section_number=analysis.section_number,
+                section_title=analysis.section_title,
+                coverage_status=analysis.coverage_status,
+                gap_analysis=analysis.gap_analysis,
+                matched_obligations=analysis.matched_obligations,
+                recommended_section=analysis.recommended_section or None,
+            )
+            for analysis in result["section_analyses"]
+        ]
+
+        logger.info(
+            f"Regulatory gap analysis completed for alert_id={alert_id}, "
+            f"policy={resolved_policy_name}, sections={result['summary']['total_sections']}"
+        )
+        return RegulatoryPolicyGapAnalysisResponse(
+            success=True,
+            alert_id=alert_id,
+            alert_title=alert_title,
+            policy_name=resolved_policy_name,
+            obligations=[
+                Obligation(
+                    obligation_id=o.get("obligation_id", ""),
+                    obligation_text=o.get("obligation_text", ""),
+                    obligation_category=o.get("obligation_category", ""),
+                    priority=o.get("priority", ""),
+                    rationale=o.get("rationale", ""),
+                )
+                for o in obligations
+            ],
+            section_analyses=section_analyses,
+            summary=result["summary"],
+        )
+    except ValueError as e:
+        logger.error(f"Validation error in regulatory gap analysis: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in regulatory gap analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Database error occurred"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in regulatory gap analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to analyze regulatory policy gaps: {str(e)}"},
         )
 
 

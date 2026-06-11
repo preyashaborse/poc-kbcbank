@@ -41,3 +41,11 @@ class ExtractObligationsRequest(BaseModel):
 
     extracted_document_text: Optional[str] = Field(default=None, alias="extractedDocumentText")
 
+
+class RegulatoryPolicyGapAnalysisRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    policy_name: str
+    obligations: Optional[list[dict]] = None
+    extracted_document_text: Optional[str] = Field(default=None, alias="extractedDocumentText")
+

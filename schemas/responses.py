@@ -104,6 +104,35 @@ class PolicyGapAnalysisResponse(BaseModel):
     )
 
 
+class Obligation(BaseModel):
+    obligation_id: str
+    obligation_text: str
+    obligation_category: str
+    priority: str
+    rationale: str
+
+
+class RegulatorySectionGapAnalysis(BaseModel):
+    section_number: str
+    section_title: str
+    coverage_status: str = Field(
+        description="Fully Covered, Partially Covered, Missing, or No Impact"
+    )
+    gap_analysis: str
+    matched_obligations: list[str] = []
+    recommended_section: str | None = None
+
+
+class RegulatoryPolicyGapAnalysisResponse(BaseModel):
+    success: bool
+    alert_id: str
+    alert_title: str
+    policy_name: str
+    obligations: list[Obligation]
+    section_analyses: list[RegulatorySectionGapAnalysis]
+    summary: dict = Field(description="Summary counts of coverage statuses")
+
+
 class PolicyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -135,14 +164,6 @@ class PolicyDocumentResponse(BaseModel):
     references: list[PolicyDocumentReference] = []
     controls: list[str] = []
     relatedRisks: list[str] = []
-
-
-class Obligation(BaseModel):
-    obligation_id: str
-    obligation_text: str
-    obligation_category: str
-    priority: str
-    rationale: str
 
 
 class ExtractObligationsResponse(BaseModel):
