@@ -36,5 +36,8 @@ class AnalyzeLinkedPolicyRequest(BaseModel):
     obligations: Optional[list[dict]] = None
 
 
+class ExtractObligationsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
 
+    extracted_document_text: Optional[str] = Field(default=None, alias="extractedDocumentText")
 

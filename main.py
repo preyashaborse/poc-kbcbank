@@ -18,6 +18,7 @@ from schemas.requests import (
     AnalyzeLinkedPolicyRequest,
     AnalyzePolicyImpactRequest,
     CreateRiskRequest,
+    ExtractObligationsRequest,
     PolicyGapAnalysisRequest,
 )
 from schemas.responses import (
@@ -1004,17 +1005,32 @@ def build_regulatory_content(alert: RegulatoryChangeAlert) -> str:
     )
 
 
+def append_uploaded_document_text(regulatory_content: str, uploaded_text: str | None) -> str:
+    """Append optional user-uploaded regulatory document text to the content block."""
+    if not uploaded_text or not uploaded_text.strip():
+        return regulatory_content
+    uploaded_section = f"Uploaded Regulatory Document Text:\n{uploaded_text.strip()}"
+    if regulatory_content.strip():
+        return f"{regulatory_content}\n\n{uploaded_section}"
+    return uploaded_section
+
+
 @app.post(
     "/regulatory-change-alerts/{alert_id}/extract-obligations",
     response_model=ExtractObligationsResponse,
 )
-async def extract_obligations(alert_id: str):
+async def extract_obligations(
+    alert_id: str,
+    body: ExtractObligationsRequest | None = None,
+):
     """
     Extract compliance obligations from a regulatory change alert's content using an LLM.
     Takes all data fields of the given regulatory change alert and returns extracted obligations.
+    Optionally accepts extractedDocumentText from a user-uploaded regulatory document.
     """
     try:
         logger.info(f"Starting obligation extraction for alert_id={alert_id}")
+        uploaded_text = body.extracted_document_text if body else None
         with get_db() as db:
             alert = (
                 db.query(RegulatoryChangeAlert)
@@ -1028,7 +1044,10 @@ async def extract_obligations(alert_id: str):
                     content={"success": False, "message": "Regulatory change alert not found"},
                 )
 
-            regulatory_content = build_regulatory_content(alert)
+            regulatory_content = append_uploaded_document_text(
+                build_regulatory_content(alert),
+                uploaded_text,
+            )
             alert_title = alert.title
 
         extractor = ObligationExtractor()
