@@ -64,17 +64,46 @@ class PolicyGapAnalyzer:
             logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
             raise
         
+    def _normalize_policy_name(self, name: str) -> str:
+        """Normalize policy names/ids for fuzzy file matching."""
+        normalized = name.lower().strip()
+        normalized = normalized.replace("&", " and ")
+        normalized = normalized.replace("-", " ")
+        normalized = normalized.replace("_", " ")
+        return " ".join(normalized.split())
+
+    def _extract_policy_id(self, filename: str) -> str | None:
+        """Extract POL-xxx id from a policy filename."""
+        stem = Path(filename).stem
+        if not stem.upper().startswith("POL_"):
+            return None
+        parts = stem.split("_", 2)
+        if len(parts) >= 2 and parts[1].isdigit():
+            return f"POL-{parts[1]}"
+        return None
+
     def _find_policy_file(self, policy_name: str) -> Path | None:
         """Find the policy PDF file by name."""
         logger.debug(f"Searching for policy: {policy_name}")
         policy_files = list(self.policies_folder.glob("POL_*.pdf"))
-        
+        normalized_query = self._normalize_policy_name(policy_name)
+
         for policy_file in policy_files:
             file_policy_name = self._extract_policy_name(policy_file.name)
-            if policy_name.lower() in file_policy_name.lower() or file_policy_name.lower() in policy_name.lower():
+            normalized_file_name = self._normalize_policy_name(file_policy_name)
+            file_policy_id = self._extract_policy_id(policy_file.name)
+
+            if (
+                normalized_query in normalized_file_name
+                or normalized_file_name in normalized_query
+                or (
+                    file_policy_id
+                    and self._normalize_policy_name(file_policy_id) == normalized_query
+                )
+            ):
                 logger.info(f"Found policy file: {policy_file.name}")
                 return policy_file
-        
+
         logger.warning(f"Policy '{policy_name}' not found in {self.policies_folder}")
         return None
     
