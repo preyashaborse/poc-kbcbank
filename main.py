@@ -21,6 +21,7 @@ from schemas.requests import (
     ExtractObligationsRequest,
     PolicyConsistencyAnalysisRequest,
     PolicyGapAnalysisRequest,
+    PolicyRewritingAnalysisRequest,
     RegulatoryPolicyGapAnalysisRequest,
 )
 from schemas.responses import (
@@ -40,6 +41,7 @@ from schemas.responses import (
     RegulatoryPolicyGapAnalysisResponse,
     RegulatorySectionGapAnalysis,
     PolicyConsistencyAnalysisResponse,
+    PolicyRewritingAnalysisResponse,
     RiskResponse,
     SectionGapAnalysis,
 )
@@ -49,6 +51,7 @@ from services.obligation_extractor import ObligationExtractor
 from services.linked_policy_analyzer import LinkedPolicyAnalyzer
 from services.regulatory_policy_gap_analyzer import RegulatoryPolicyGapAnalyzer
 from services.policy_review_analyzer import PolicyReviewAnalyzer
+from services.policy_rewriting_analyzer import PolicyRewritingAnalyzer
 
 load_dotenv()
 
@@ -1386,29 +1389,29 @@ async def _perform_consistency_analysis(document_name: str) -> PolicyConsistency
     return PolicyConsistencyAnalysisResponse(success=True, report=report)
 
 
-@app.post("/review-analysis/{document_name}", response_model=PolicyConsistencyAnalysisResponse)
-async def review_analysis(document_name: str):
-    """
-    UC 3.3 Policy Consistency Analysis.
+# @app.post("/review-analysis/{document_name}", response_model=PolicyConsistencyAnalysisResponse)
+# async def review_analysis(document_name: str):
+#     """
+#     UC 3.3 Policy Consistency Analysis.
 
-    Loads the local PolicyDocument draft, resolves referenced global policy PDFs from
-    Files/policies/, and runs a single LLM scan for CONFLICT, INCONSISTENCY, BLIND SPOT,
-    and CONTROLS & RISKS findings with publication readiness.
-    """
-    try:
-        return await _perform_consistency_analysis(document_name)
-    except ValueError as e:
-        logger.error(f"Validation error in consistency analysis: {e}")
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": str(e)},
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error in consistency analysis: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Failed to perform consistency analysis: {str(e)}"},
-        )
+#     Loads the local PolicyDocument draft, resolves referenced global policy PDFs from
+#     Files/policies/, and runs a single LLM scan for CONFLICT, INCONSISTENCY, BLIND SPOT,
+#     and CONTROLS & RISKS findings with publication readiness.
+#     """
+#     try:
+#         return await _perform_consistency_analysis(document_name)
+#     except ValueError as e:
+#         logger.error(f"Validation error in consistency analysis: {e}")
+#         return JSONResponse(
+#             status_code=400,
+#             content={"success": False, "message": str(e)},
+#         )
+#     except Exception as e:
+#         logger.error(f"Unexpected error in consistency analysis: {e}", exc_info=True)
+#         return JSONResponse(
+#             status_code=500,
+#             content={"success": False, "message": f"Failed to perform consistency analysis: {str(e)}"},
+#         ) not in use for now
 
 
 @app.post(
@@ -1449,6 +1452,61 @@ async def policy_consistency_analysis_by_body(body: PolicyConsistencyAnalysisReq
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to perform consistency analysis: {str(e)}"},
+        )
+
+
+@app.post("/policies/rewriting-analysis", response_model=PolicyRewritingAnalysisResponse)
+async def policy_rewriting_analysis(body: PolicyRewritingAnalysisRequest):
+    """Policy Rewriting Assistant - analyzes policy for improvements across four dimensions."""
+    try:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("OPENAI_API_KEY not found in environment variables")
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": "OpenAI API key not configured"},
+            )
+
+        policy_data = next(
+            (p for p in POLICY_DATA_SEED if p["documentName"] == body.document_name),
+            None,
+        )
+        if not policy_data:
+            logger.error(f"Policy not found: {body.document_name}")
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": f"Policy '{body.document_name}' not found"},
+            )
+
+        policy_content = policy_data.get("template", "")
+        if not policy_content:
+            logger.error(f"Policy content not found for: {body.document_name}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"Policy content not available for '{body.document_name}'"},
+            )
+
+        analyzer = PolicyRewritingAnalyzer(openai_api_key=openai_api_key)
+        analysis = await analyzer.analyze_rewriting(
+            policy_content=policy_content,
+            template_context=body.template_context,
+        )
+
+        return PolicyRewritingAnalysisResponse(
+            success=True,
+            analysis=analysis,
+        )
+    except ValueError as e:
+        logger.error(f"Validation error in rewriting analysis: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in rewriting analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to perform rewriting analysis: {str(e)}"},
         )
 
 

@@ -56,3 +56,14 @@ class PolicyConsistencyAnalysisRequest(BaseModel):
     document_name: str = Field(
         description="PolicyDocument.documentName of the local policy draft to review",
     )
+
+
+class PolicyRewritingAnalysisRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_name: str = Field(
+        description="PolicyDocument.documentName"
+    )
+    template_context: str = Field(
+        description="Organizational policy template context from UI"
+    )

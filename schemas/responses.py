@@ -290,3 +290,32 @@ class PolicyConsistencyAnalysisResponse(BaseModel):
     success: bool
     report: ConsistencyAnalysisReport | None = None
     message: str | None = None
+
+
+class RewritingFinding(BaseModel):
+    section_reference: str = Field(description="Section reference or location in the policy")
+    issue: str = Field(description="Description of the issue identified")
+    proposed_rewrite: str = Field(description="Proposed rewrite or improvement")
+    rationale: str = Field(description="Explanation of why this change improves the policy")
+    score: float = Field(ge=0, le=100, description="Score for this specific finding (0-100)")
+
+
+class DimensionAnalysis(BaseModel):
+    findings: list[RewritingFinding] = Field(default_factory=list)
+    dimension_score: float = Field(ge=0, le=100, description="Overall score for this dimension (0-100)")
+    dimension_rationale: str = Field(description="Overall rationale for the dimension score")
+
+
+class PolicyRewritingAnalysis(BaseModel):
+    clarity_and_language: DimensionAnalysis
+    structure_and_formatting: DimensionAnalysis
+    machine_readability: DimensionAnalysis
+    consistency: DimensionAnalysis
+    overall_score: float = Field(ge=0, le=100, description="Overall weighted score (0-100)")
+    overall_rationale: str = Field(description="Explanation of how overall score was calculated")
+
+
+class PolicyRewritingAnalysisResponse(BaseModel):
+    success: bool
+    analysis: PolicyRewritingAnalysis | None = None
+    message: str | None = None

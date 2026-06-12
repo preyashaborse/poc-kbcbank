@@ -71,14 +71,26 @@ Detect:
 - Regulatory obligation missing
 - Parent policy requirement missing where local supplement is required
 
-CONTROLS & RISKS
+CONTROL
+A linked control that is affected by or related to CONFLICT, INCONSISTENCY, or BLIND SPOT findings.
+Severity = Varies (depends on related finding).
 
 Detect:
-- Controls affected by conflicts
-- Controls affected by inconsistencies
-- Risks with no policy coverage
-- Risks with no control coverage
-- Policy sections with no mapped controls
+- Controls affected by conflicts (unenforceable)
+- Controls affected by inconsistencies (partially enforceable)
+- Controls with no policy section support (blind spot)
+- For each control, explicitly state which finding type affects it (CONFLICT, INCONSISTENCY, or BLIND SPOT)
+
+RISK
+A linked risk that is unmitigated, uncovered, or partially covered by policy.
+Severity = Advisory.
+
+Detect:
+- Risks with no policy section addressing them (unmitigated)
+- Risks with no control mechanism (uncovered)
+- Risks with partial policy coverage
+- For each risk, explicitly state which finding type affects coverage (CONFLICT, INCONSISTENCY, or BLIND SPOT)
+- For each risk, state whether it has policy coverage and control coverage
 
 Hierarchy Rules:
 
@@ -103,9 +115,6 @@ Proposed Resolution
 Confidence
 Status
 
-Status must always be:
-
-Awaiting SME
 
 Use exact document sections and exact excerpts from provided documents.
 
@@ -135,7 +144,7 @@ class _LLMFinding(BaseModel):
     issue: str
     proposed_resolution: str
     confidence: float = Field(ge=0, le=100)
-    status: str = "Awaiting SME"
+    related_finding_ids: list[str] = Field(default_factory=list)
 
 
 class _LLMReport(BaseModel):
@@ -373,7 +382,10 @@ LINKED RISKS:
 Unresolved reference count: {unresolved_count}
 
 Return JSON with:
-- findings: array of findings (types: CONFLICT, INCONSISTENCY, BLIND SPOT, CONTROLS & RISKS)
+- findings: array of findings (types: CONFLICT, INCONSISTENCY, BLIND SPOT, CONTROL, RISK)
+  - Use CONTROL type for findings about linked controls affected by conflicts/inconsistencies/blind spots
+  - Use RISK type for findings about linked risks that are unmitigated, uncovered, or partially covered
+  - Do NOT use CONTROLS & RISKS as a type - use CONTROL or RISK separately
 - overall_confidence: 0-100 score for the full scan
 
 {self.parser.get_format_instructions()}"""
@@ -407,14 +419,13 @@ Return JSON with:
             "CONFLICT": 0,
             "INCONSISTENCY": 0,
             "BLIND SPOT": 0,
-            "CONTROLS & RISKS": 0,
+            "CONTROL": 0,
+            "RISK": 0,
         }
         for finding in findings:
             normalized = finding.type.strip().upper()
             if normalized in counts:
                 counts[normalized] += 1
-            elif "CONTROL" in normalized or "RISK" in normalized:
-                counts["CONTROLS & RISKS"] += 1
         return counts
 
     def _compute_overall_confidence(
@@ -444,19 +455,19 @@ Return JSON with:
         ):
             source_b = {
                 "document_id": finding.source_b.document_id,
-                "version": finding.source_b.version,
+                "version": "2",
                 "section": finding.source_b.section,
                 "excerpt": finding.source_b.excerpt,
             }
 
-        return {
+        normalized = {
             "id": finding.id,
             "type": finding.type,
             "severity": finding.severity,
             "title": finding.title,
             "source_a": {
                 "document_id": finding.source_a.document_id,
-                "version": finding.source_a.version,
+                "version": "1",
                 "section": finding.source_a.section,
                 "excerpt": finding.source_a.excerpt,
             },
@@ -464,8 +475,12 @@ Return JSON with:
             "issue": finding.issue,
             "proposed_resolution": finding.proposed_resolution,
             "confidence": finding.confidence,
-            "status": "Awaiting SME",
         }
+        
+        if finding.related_finding_ids:
+            normalized["related_finding_ids"] = finding.related_finding_ids
+        
+        return normalized
 
     async def analyze_consistency(self, policy_data: dict) -> dict:
         """Run UC 3.3 policy consistency analysis (local + referenced global + controls + risks)."""
@@ -513,12 +528,13 @@ Return JSON with:
             "primary_policy": {
                 "policy_id": primary_id,
                 "title": primary_title,
-                "version": primary_version,
+                "version": "1",
             },
             "references_fetched": [
                 {
                     "document_id": ref.document_id,
-                    "version": ref.version,
+                    "version": "2",
+                    "title": ref.title if ref.title else ref.document_id,
                     "status": ref.status.lower() if ref.status == "resolved" else ref.status,
                 }
                 for ref in resolved_refs
@@ -527,7 +543,8 @@ Return JSON with:
                 "conflicts": type_counts["CONFLICT"],
                 "inconsistencies": type_counts["INCONSISTENCY"],
                 "blind_spots": type_counts["BLIND SPOT"],
-                "controls_and_risks": type_counts["CONTROLS & RISKS"],
+                "controls": type_counts["CONTROL"],
+                "risks": type_counts["RISK"],
             },
             "overall_confidence": round(overall_confidence, 1),
             "publication_readiness": {
