@@ -49,3 +49,10 @@ class RegulatoryPolicyGapAnalysisRequest(BaseModel):
     obligations: Optional[list[dict]] = None
     extracted_document_text: Optional[str] = Field(default=None, alias="extractedDocumentText")
 
+
+class PolicyConsistencyAnalysisRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_name: str = Field(
+        description="PolicyDocument.documentName of the local policy draft to review",
+    )

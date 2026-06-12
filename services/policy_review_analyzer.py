@@ -1,778 +1,538 @@
+import json
 import logging
 import os
 import re
-from datetime import datetime
-from typing import Optional
-import httpx
+from datetime import datetime, timezone
+from pathlib import Path
+
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+SYSTEM_PROMPT = """You are an AI Policy Scan Engine integrated into MetricStream Policy Management.
 
-class PolicyFinding(BaseModel):
-    finding_id: str
-    finding_type: str
+You are reviewing a primary policy draft against:
+
+1. Referenced Global Policies
+2. Referenced Local Policies
+3. Linked Controls
+4. Linked Risks
+
+Your purpose is to identify:
+
+- CONFLICT
+- INCONSISTENCY
+- BLIND SPOT
+- CONTROLS & RISKS
+
+Definitions:
+
+CONFLICT
+Two provisions that cannot both be true simultaneously.
+Severity = Blocking.
+
+Detect:
+- Threshold mismatches
+- Approval mismatches
+- Numerical conflicts
+- Global vs Local hierarchy violations
+- Contradictory requirements
+
+INCONSISTENCY
+Statements that do not directly conflict but create ambiguity or operational confusion.
+Severity = Non-Blocking.
+
+Detect:
+- Different terminology
+- Undefined threshold gaps
+- Ambiguous ownership
+- Timing dependencies
+- Restatement of Global policy without local specificity
+
+BLIND SPOT
+Material topics absent from the policy.
+
+Severity = Advisory.
+
+Detect:
+- Risk not addressed in policy
+- Control not supported by policy text
+- Regulatory obligation missing
+- Parent policy requirement missing where local supplement is required
+
+CONTROLS & RISKS
+
+Detect:
+- Controls affected by conflicts
+- Controls affected by inconsistencies
+- Risks with no policy coverage
+- Risks with no control coverage
+- Policy sections with no mapped controls
+
+Hierarchy Rules:
+
+- Global Policy is authoritative baseline.
+- Local Policy may be more restrictive.
+- Local Policy may not be less restrictive.
+- If Local is less restrictive than Global, classify as CONFLICT.
+- If Local simply repeats Global with no additional specificity, classify as INCONSISTENCY.
+- If a topic exists only in Global, do not automatically flag it.
+- Flag only if local regulatory context requires a local supplement.
+
+For every finding provide:
+
+ID
+Type
+Severity
+Title
+Source A
+Source B
+Issue
+Proposed Resolution
+Confidence
+Status
+
+Status must always be:
+
+Awaiting SME
+
+Use exact document sections and exact excerpts from provided documents.
+
+Do not invent content.
+
+Do not approve policies.
+
+Do not publish policies.
+
+Produce output as valid JSON only."""
+
+
+class _LLMFindingSource(BaseModel):
+    document_id: str = ""
+    version: str = ""
+    section: str = ""
+    excerpt: str = ""
+
+
+class _LLMFinding(BaseModel):
+    id: str
+    type: str
     severity: str
     title: str
-    description: str
-    affected_sections: list[str]
-    cited_excerpts: list[str]
-    confidence_score: float
-    confidence_reason: str
-    cross_document_refs: list[str] = []
-    remediation_notes: str = ""
+    source_a: _LLMFindingSource
+    source_b: _LLMFindingSource | None = None
+    issue: str
+    proposed_resolution: str
+    confidence: float = Field(ge=0, le=100)
+    status: str = "Awaiting SME"
 
 
-class ControlFinding(BaseModel):
-    control_id: str
-    control_text: str
-    status: str
-    linked_findings: list[str]
-    notes: str
+class _LLMReport(BaseModel):
+    findings: list[_LLMFinding] = []
+    overall_confidence: float | None = Field(default=None, ge=0, le=100)
 
 
-class RiskFinding(BaseModel):
-    risk_id: str
-    risk_text: str
-    status: str
-    policy_coverage: str
-    linked_findings: list[str]
-    notes: str
+class ResolvedReference(BaseModel):
+    document_id: str
+    version: str = ""
+    title: str = ""
+    content: str = ""
+    status: str = "resolved"
+    url: str = ""
 
 
 class PolicyReviewAnalyzer:
-    SYSTEM_PROMPT = """You are an AI Policy Scan Engine integrated into MetricStream Policy Management.
- 
-You receive a policy object containing: policy text (template), controls, relatedRisks, and references (URLs to parent or related policies).
- 
-For each reference URL: fetch and analyse the document. If unreachable, note it and mark all related findings as [UNVERIFIED]. If the fetched document's version or date differs from the version cited in the policy metadata, flag the discrepancy, reduce confidence by 10 points, and apply findings based on the fetched version noting the version delta in each affected finding. If a reference URL resolves to a document that itself references the primary policy under scan, do not fetch it recursively — note the circular reference and mark related findings as [UNVERIFIED — CIRCULAR REFERENCE].
- 
----
- 
-## YOUR JOB
- 
-Scan the policy and all fetched references. Produce a structured report using the finding schema below. Four finding types:
- 
-CONFLICT — Two provisions that cannot both be correct simultaneously. Severity: Blocking. Detect: numerical mismatches, hierarchy violations (local is less restrictive than global parent), contradictory rules for the same scenario across or within documents. Two provisions describe the same scenario if they would both apply to the same real-world transaction, event, or decision — determined by subject (same actor), object (same asset or action), and trigger condition (overlapping threshold or circumstance), not by identical wording.
- 
-INCONSISTENCY — Provisions that don't contradict but cause ambiguity or procedural confusion. Severity: Non-Blocking. Detect: undefined gaps between thresholds, same item named differently in different sections, timing dependencies that make a commitment impossible to honour simultaneously.
- 
-BLIND SPOT — A material topic absent from the policy where absence creates regulatory exposure or misalignment with stated commitments. Severity: Advisory. A topic qualifies only if at least one of the following is true: (a) it is required by a regulation cited in the policy's references; (b) it is addressed in a parent policy and local regulatory context warrants a local supplement; (c) the organisation has a documented public commitment (CSRD, AI governance framework, privacy policy) that this policy's subject matter would be expected to operationalise; or (d) it is addressed in linked controls or risks but has no corresponding policy section. Detect: regulations or cross-referenced policies mentioned with no corresponding mechanism; stated commitments with no operational provision.
- 
-CONTROLS & RISKS — After the above findings: flag any control linked to a section with a Conflict or Inconsistency (may be unenforceable); flag any risk with no policy section and no control addressing it (unmitigated); flag any policy section with no mapped control (advisory gap).
- 
----
- 
-## FINDING SCHEMA
- 
-Each finding must use this exact structure:
- 
-  ID: [C/I/B/CR]-[NNN]
-  Type: [CONFLICT | INCONSISTENCY | BLIND SPOT | CONTROLS & RISKS]
-  Severity: [Blocking | Non-Blocking | Advisory]
-  Title: [≤12 words]
-  Source A: [Document ID, version, section, verbatim excerpt ≤30 words]
-  Source B: [Document ID, version, section, verbatim excerpt ≤30 words — or "N/A" for blind spots]
-  Issue: [2–4 sentences, no recommendations]
-  Proposed Resolution: [Option A / Option B for policy judgement calls; single recommendation for factual fixes only]
-  Confidence: [0–100]%
-  Status: Awaiting SME
- 
----
- 
-## HIERARCHY RULE
- 
-When a reference URL resolves to a parent/global policy:
-- Local MORE restrictive than Global → valid.
-- Local LESS restrictive than Global → CONFLICT (Blocking).
-- Local restates Global without adding specificity → INCONSISTENCY (Non-Blocking).
-- Topic absent from BOTH → Blind Spot candidate.
-- Topic in Global, absent from Local → not a gap (Global governs); flag only if local regulatory context warrants a local supplement.
- 
-Always cite both document IDs and versions in cross-document findings.
- 
----
- 
-## ONE EXAMPLE
- 
-Input:
-  Local §3.1: "Pre-approval required for trips exceeding EUR 1,000"
-  Global §8.2 (from fetched reference): "Expense claims exceeding EUR 800 must include a pre-approval copy"
-  Control: "CTR-001 — Automated block at EUR 800 threshold"
- 
-Findings produced:
-  ID: C-001
-  Type: CONFLICT
-  Severity: Blocking
-  Title: Pre-approval threshold contradicts expense documentation requirement
-  Source A: POL-T002 v2.1, §3.1 — "Pre-approval required for trips exceeding EUR 1,000"
-  Source B: POL-T001 v1.2, §8.2 — "Expense claims exceeding EUR 800 must include a pre-approval copy"
-  Issue: §3.1 triggers pre-approval at EUR 1,000 but §8.2 requires a pre-approval document for claims above EUR 800. A trip costing EUR 900 requires the document but has no approval obligation to generate it. The two thresholds cannot coexist without creating an unenforceable documentation requirement for the EUR 800–999 band.
-  Proposed Resolution: Option A — Align both thresholds to EUR 1,000 and add a retrospective confirmation process for the EUR 800–999 band. Option B — Align both thresholds to EUR 800 (more conservative). Group CFO to confirm which reflects current risk appetite.
-  Confidence: 94%
-  Status: Awaiting SME
- 
-  ID: CR-001
-  Type: CONTROLS & RISKS
-  Severity: Non-Blocking
-  Title: CTR-001 calibrated to unresolved conflict threshold
-  Source A: CTR-001 — "Automated block at EUR 800 threshold"
-  Source B: C-001 (above)
-  Issue: CTR-001 enforces a EUR 800 threshold that has no confirmed policy backing until C-001 is resolved. The control is partially unenforceable for the EUR 800–999 band.
-  Proposed Resolution: Suspend threshold configuration change until C-001 is resolved. Update CTR-001 parameter to match the confirmed threshold.
-  Confidence: 94%
-  Status: Awaiting SME
- 
----
- 
-## REPORT HEADER (required)
- 
-The report must open with:
-  Scan Date: [timestamp]
-  Primary Policy: [ID, title, version]
-  References Fetched: [list with status — resolved / unresolved / circular]
-  Total Findings: [n Conflicts | n Inconsistencies | n Blind Spots | n Controls & Risks]
-  Overall Confidence: [0–100]%  |  Reason: [one sentence]  |  Reduction factors: [list]
-  Publication Readiness: [READY | NOT READY — [n] blocking issues]
- 
----
- 
-## CONSTRAINTS
- 
-- Cite exact section numbers and verbatim excerpts (≤30 words) for every finding.
-- Do not invent policy content not present in the inputs.
-- Do not recommend one resolution option over another on policy judgement calls; reserve single recommendations for factual fixes only (naming errors, arithmetic, citation corrections).
-- The AI does not approve or publish policies. The Policy Owner retains full authority.
-- All findings default to Status: Awaiting SME. Do not change this field.
-- Confidence score must appear in the report header as a structured field, not embedded in narrative text. Deductions: −10 per unresolved reference URL; −10 if version metadata is missing from any scanned document; −5 if policy scope is ambiguous; −15 if no linked controls or risks are provided."""
+    CONFIDENCE_DEDUCTION_UNRESOLVED = 10
 
-    def __init__(self):
+    def __init__(self, policies_folder: str = "Files/policies"):
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             logger.error("OPENAI_API_KEY not found in environment variables")
             raise ValueError("OPENAI_API_KEY not found in environment variables")
 
-        try:
-            self.llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=api_key)
-            logger.info("PolicyReviewAnalyzer initialized with system prompt")
-        except Exception as e:
-            logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
-            raise
-
-    async def fetch_reference_document(self, url: str) -> tuple[str, bool]:
-        """Fetch and extract text from a reference URL."""
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                logger.info(f"Successfully fetched reference document: {url}")
-                return response.text[:8000], True
-        except Exception as e:
-            logger.warning(f"Failed to fetch reference document {url}: {e}")
-            return "", False
+        self.policies_folder = Path(policies_folder)
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=api_key)
+        self.parser = JsonOutputParser(pydantic_object=_LLMReport)
+        logger.info("PolicyReviewAnalyzer initialized for consistency analysis")
 
     def _extract_document_id_and_version(self, template: str) -> tuple[str, str]:
-        """Extract document ID and version from policy template dynamically."""
         doc_id = "POL-UNKNOWN"
         version = "1.0"
-        
+
         patterns = [
-            r'(POL-[A-Z0-9]+)\s*[—–-].*?[—–-]\s*v([\d.]+)',
-            r'(POL-[A-Z0-9]+).*?v([\d.]+)',
-            r'([A-Z]{2,}-[A-Z0-9]+)\s*[—–-].*?[—–-]\s*v([\d.]+)',
-            r'([A-Z]{2,}-[A-Z0-9]+).*?v([\d.]+)',
-            r'(POL-[A-Z0-9]+)',
-            r'([A-Z]{2,}-[A-Z0-9]+)',
-            r'v([\d.]+)',
+            r"(POL-[A-Z0-9]+)\s*[—–-].*?[—–-]\s*v([\d.]+)",
+            r"(POL-[A-Z0-9]+).*?v([\d.]+)",
+            r"([A-Z]{2,}-[A-Z0-9]+)\s*[—–-].*?[—–-]\s*v([\d.]+)",
+            r"([A-Z]{2,}-[A-Z0-9]+).*?v([\d.]+)",
+            r"(POL-[A-Z0-9]+)",
+            r"([A-Z]{2,}-[A-Z0-9]+)",
+            r"v([\d.]+)",
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, template, re.IGNORECASE)
-            if match:
-                groups = match.groups()
-                if len(groups) == 2:
-                    doc_id, version = groups[0].upper(), groups[1]
-                    break
-                elif len(groups) == 1:
-                    if 'v' in pattern.lower():
-                        version = groups[0]
-                    else:
-                        doc_id = groups[0].upper()
-        
+            if not match:
+                continue
+            groups = match.groups()
+            if len(groups) == 2:
+                doc_id, version = groups[0].upper(), groups[1]
+                break
+            if len(groups) == 1:
+                if "v" in pattern.lower():
+                    version = groups[0]
+                else:
+                    doc_id = groups[0].upper()
+
+        if not version.startswith("v"):
+            version = f"v{version}"
+
         return doc_id, version
 
-    def _extract_sections(self, template: str) -> dict[str, str]:
-        """Extract all sections from policy template dynamically, handling various formats."""
-        sections = {}
-        
-        section_patterns = [
-            (r'(§\d+\.?\d*)\s*[—–-]?\s*([^\n]+)\n((?:(?!§\d)[^\n])*)', 'symbol'),
-            (r'(\d+\.\d+)\s+([^\n]+)\n((?:(?!\d+\.\d+)[^\n])*)', 'decimal'),
-            (r'(Section\s+\d+\.?\d*)\s*[—–-]?\s*([^\n]+)\n((?:(?!Section\s+\d)[^\n])*)', 'word'),
-            (r'(\d+\.0)\s+([^\n]+)\n((?:(?!\d+\.0)[^\n])*)', 'major'),
-            (r'(Part\s+[IVX]+)\s*[—–-]?\s*([^\n]+)\n((?:(?!Part\s+[IVX]+)[^\n])*)', 'roman'),
-        ]
-        
-        for pattern, pattern_type in section_patterns:
-            matches = list(re.finditer(pattern, template, re.MULTILINE | re.IGNORECASE))
-            if matches:
-                logger.info(f"Detected section format: {pattern_type}")
-                for match in matches:
-                    section_num = match.group(1).strip()
-                    section_title = match.group(2).strip() if len(match.groups()) >= 2 else ""
-                    section_content = match.group(3).strip() if len(match.groups()) >= 3 else ""
-                    
-                    if section_content:
-                        sections[section_num] = {
-                            'title': section_title,
-                            'content': section_content
-                        }
-                
-                if sections:
-                    break
-        
-        if not sections:
-            lines = template.split('\n')
-            current_section = None
-            current_content = []
-            
-            for line in lines:
-                if re.match(r'^[0-9§IVX]', line.strip()) and len(line.strip()) > 1:
-                    if current_section:
-                        sections[current_section['num']] = {
-                            'title': current_section['title'],
-                            'content': '\n'.join(current_content).strip()
-                        }
-                    
-                    parts = line.split(':', 1)
-                    current_section = {
-                        'num': parts[0].strip(),
-                        'title': parts[1].strip() if len(parts) > 1 else ''
-                    }
-                    current_content = []
-                elif current_section:
-                    current_content.append(line)
-            
-            if current_section:
-                sections[current_section['num']] = {
-                    'title': current_section['title'],
-                    'content': '\n'.join(current_content).strip()
-                }
-        
-        if not sections:
-            sections['FULL_TEMPLATE'] = {
-                'title': 'Full Policy Document',
-                'content': template
-            }
-            logger.warning("Could not parse sections; treating entire template as single section")
-        
-        return sections
+    def _extract_primary_title(self, template: str, document_name: str) -> str:
+        header_match = re.search(
+            r"^[A-Z0-9]+-[A-Z0-9]+\s*[—–-]\s*(.+?)\s*[—–-]\s*v",
+            template.strip(),
+            re.MULTILINE | re.IGNORECASE,
+        )
+        if header_match:
+            return header_match.group(1).strip()
+        return document_name
 
-    async def _detect_conflicts(self, sections: dict, references_content: list[tuple[str, bool]]) -> list[PolicyFinding]:
-        """Detect CONFLICT findings (blocking severity) - provisions that cannot coexist."""
-        findings = []
-        finding_counter = 1
+    def _extract_ref_from_url(self, url: str) -> tuple[str, str]:
+        match = re.search(r"(POL-[A-Z0-9]+)-v([\d.]+)", url, re.IGNORECASE)
+        if match:
+            return match.group(1).upper(), f"v{match.group(2)}"
 
-        for section_num, section_data in sections.items():
-            content = section_data['content']
-            section_title = section_data['title']
-            
-            threshold_matches = re.findall(r'EUR\s+([\d,]+)', content)
-            approval_context = 'pre-approval' in content.lower() or 'approval' in content.lower()
-            
-            if threshold_matches and approval_context:
-                for ref_idx, (ref_content, is_verified) in enumerate(references_content):
-                    ref_thresholds = re.findall(r'EUR\s+([\d,]+)', ref_content)
-                    ref_approval_context = 'pre-approval' in ref_content.lower() or 'approval' in ref_content.lower()
-                    
-                    if ref_thresholds and ref_approval_context:
-                        for local_threshold in threshold_matches:
-                            for ref_threshold in ref_thresholds:
-                                local_val = int(local_threshold.replace(',', ''))
-                                ref_val = int(ref_threshold.replace(',', ''))
-                                
-                                if local_val > ref_val:
-                                    mid_point = (local_val + ref_val) // 2
-                                    description = f"§{section_num} requires pre-approval at EUR {local_threshold} but referenced global policy requires pre-approval at EUR {ref_threshold}. A transaction at EUR {mid_point} would require a pre-approval document (per global policy) but would not trigger the approval obligation (per local policy). These two thresholds cannot coexist."
-                                    
-                                    cited_excerpts = [
-                                        f"Local §{section_num}: {content[:150]}",
-                                        f"Global Policy: {ref_content[:150]}"
-                                    ]
-                                    
-                                    confidence_score, confidence_reason = await self._score_finding_confidence(
-                                        "CONFLICT",
-                                        description,
-                                        cited_excerpts
-                                    )
-                                    
-                                    finding = PolicyFinding(
-                                        finding_id=f"C-{finding_counter:03d}",
-                                        finding_type="CONFLICT",
-                                        severity="Blocking",
-                                        title=f"Threshold Conflict in §{section_num}: Local ({section_title}) vs Global Policy",
-                                        description=description,
-                                        affected_sections=[section_num],
-                                        cited_excerpts=cited_excerpts,
-                                        confidence_score=confidence_score,
-                                        confidence_reason=confidence_reason,
-                                        cross_document_refs=[f"Reference {ref_idx + 1}"],
-                                        remediation_notes="Policy owner must align approval thresholds. Local threshold must not exceed global threshold."
-                                    )
-                                    findings.append(finding)
-                                    finding_counter += 1
+        match = re.search(r"(POL-[A-Z0-9]+)", url, re.IGNORECASE)
+        if match:
+            return match.group(1).upper(), ""
 
-        return findings
+        return "POL-UNKNOWN", ""
 
-    async def _detect_inconsistencies(self, sections: dict, references_content: list[tuple[str, bool]]) -> list[PolicyFinding]:
-        """Detect INCONSISTENCY findings (non-blocking severity) - ambiguity or procedural confusion."""
-        findings = []
-        finding_counter = 1
+    def _normalize_id_for_filename(self, document_id: str) -> str:
+        return document_id.upper().replace("-", "_")
 
-        for section_num, section_data in sections.items():
-            content = section_data['content']
-            section_title = section_data['title']
-            
-            if 'submission' in content.lower() or 'deadline' in content.lower() or 'within' in content.lower():
-                day_matches = re.findall(r'(\d+)\s+(?:calendar\s+)?days?', content)
-                if day_matches:
-                    for ref_idx, (ref_content, is_verified) in enumerate(references_content):
-                        ref_day_matches = re.findall(r'(\d+)\s+(?:calendar\s+)?days?', ref_content)
-                        for local_days in day_matches:
-                            for ref_days in ref_day_matches:
-                                if local_days != ref_days and int(local_days) < int(ref_days):
-                                    description = f"§{section_num} requires submission within {local_days} days, but referenced policy allows {ref_days} days. This creates a timing dependency where the local deadline is stricter than the global standard, potentially causing procedural confusion for employees who must meet the earlier deadline."
-                                    
-                                    cited_excerpts = [
-                                        f"Local §{section_num}: {content[:150]}",
-                                        f"Global Policy: {ref_content[:150]}"
-                                    ]
-                                    
-                                    confidence_score, confidence_reason = await self._score_finding_confidence(
-                                        "INCONSISTENCY",
-                                        description,
-                                        cited_excerpts
-                                    )
-                                    
-                                    finding = PolicyFinding(
-                                        finding_id=f"I-{finding_counter:03d}",
-                                        finding_type="INCONSISTENCY",
-                                        severity="Non-Blocking",
-                                        title=f"Timing Dependency Gap in §{section_num}: {section_title}",
-                                        description=description,
-                                        affected_sections=[section_num],
-                                        cited_excerpts=cited_excerpts,
-                                        confidence_score=confidence_score,
-                                        confidence_reason=confidence_reason,
-                                        cross_document_refs=[f"Reference {ref_idx + 1}"],
-                                        remediation_notes="Policy owner should clarify whether local deadline overrides global deadline or if both apply."
-                                    )
-                                    findings.append(finding)
-                                    finding_counter += 1
-            
-            if 'named' in content.lower() or 'called' in content.lower() or 'referred' in content.lower():
-                term_matches = re.findall(r'(?:named|called|referred to as|known as)\s+["\']?([^"\'.,\n]+)["\']?', content, re.IGNORECASE)
-                if term_matches:
-                    for ref_idx, (ref_content, is_verified) in enumerate(references_content):
-                        for term in term_matches:
-                            if term.lower() not in ref_content.lower():
-                                description = f"§{section_num} refers to '{term}' but this term does not appear in the referenced policy. This creates ambiguity about whether they refer to the same concept under different names."
-                                
-                                cited_excerpts = [f"Local §{section_num}: {content[:150]}"]
-                                
-                                confidence_score, confidence_reason = await self._score_finding_confidence(
-                                    "INCONSISTENCY",
-                                    description,
-                                    cited_excerpts
-                                )
-                                
-                                finding = PolicyFinding(
-                                    finding_id=f"I-{finding_counter:03d}",
-                                    finding_type="INCONSISTENCY",
-                                    severity="Non-Blocking",
-                                    title=f"Terminology Inconsistency in §{section_num}",
-                                    description=description,
-                                    affected_sections=[section_num],
-                                    cited_excerpts=cited_excerpts,
-                                    confidence_score=confidence_score,
-                                    confidence_reason=confidence_reason,
-                                    cross_document_refs=[f"Reference {ref_idx + 1}"],
-                                    remediation_notes="Policy owner should verify whether '{term}' and referenced terms are synonymous."
-                                )
-                                findings.append(finding)
-                                finding_counter += 1
+    def _find_policy_pdf(self, document_id: str) -> Path | None:
+        if not self.policies_folder.exists():
+            logger.warning(f"Policies folder not found: {self.policies_folder}")
+            return None
 
-        return findings
+        normalized = self._normalize_id_for_filename(document_id)
+        candidates: list[Path] = []
 
-    async def _detect_blind_spots(self, sections: dict, controls: list[str], related_risks: list[str]) -> list[PolicyFinding]:
-        """Detect BLIND_SPOT findings (advisory severity) - material topics absent from policy."""
-        findings = []
-        finding_counter = 1
+        for pdf in self.policies_folder.glob("*.pdf"):
+            stem_normalized = pdf.stem.upper().replace("-", "_")
+            if stem_normalized.startswith(normalized) or normalized in stem_normalized:
+                candidates.append(pdf)
 
-        policy_text = " ".join([s['content'].lower() for s in sections.values()])
-        controls_text = " ".join([c.lower() for c in controls])
-        risks_text = " ".join([r.lower() for r in related_risks])
+        if not candidates:
+            logger.warning(f"No PDF found for document_id {document_id} in {self.policies_folder}")
+            return None
 
-        regulatory_topics = {
-            'tax': ['tax', 'withholding', 'fiscal', 'bedrijfsvoorheffing', 'précompte'],
-            'gdpr': ['gdpr', 'data protection', 'personal data', 'privacy'],
-            'compliance': ['compliance', 'regulatory', 'audit', 'governance'],
-            'approval': ['approval', 'authorization', 'pre-approval', 'pre-authorization'],
-            'audit': ['audit', 'audit trail', 'logging', 'tracking'],
-            'exception': ['exception', 'waiver', 'deviation', 'override'],
-        }
+        candidates.sort(key=lambda p: p.name)
+        logger.info(f"Resolved {document_id} to PDF: {candidates[0].name}")
+        return candidates[0]
 
-        for topic, keywords in regulatory_topics.items():
-            topic_in_policy = any(kw in policy_text for kw in keywords)
-            topic_in_controls = any(kw in controls_text for kw in keywords)
-            topic_in_risks = any(kw in risks_text for kw in keywords)
+    def _load_pdf_text(self, policy_path: Path) -> str:
+        loader = PyPDFLoader(str(policy_path))
+        pages = loader.load()
+        content = "\n".join(page.page_content for page in pages)
+        logger.info(f"Loaded {len(pages)} pages from {policy_path.name}")
+        return content
 
-            if topic_in_policy and not topic_in_controls:
-                affected_sections = [
-                    section_num for section_num, section_data in sections.items()
-                    if any(kw in section_data['content'].lower() for kw in keywords)
-                ]
-                
-                description = f"Policy mentions {topic} requirements (in sections {', '.join(affected_sections)}) but no control is defined to verify or enforce {topic} compliance. This creates regulatory exposure."
-                cited_excerpts = [sections[s]['content'][:120] for s in affected_sections if s in sections]
-                
-                confidence_score, confidence_reason = await self._score_finding_confidence(
-                    "BLIND_SPOT",
-                    description,
-                    cited_excerpts
+    def _extract_title_from_pdf_filename(self, path: Path, document_id: str) -> str:
+        stem = path.stem.replace("_", " ")
+        prefix = self._normalize_id_for_filename(document_id).replace("_", " ")
+        if stem.upper().startswith(prefix):
+            remainder = stem[len(prefix):].strip()
+            if remainder:
+                return remainder
+        return stem
+
+    def _resolve_references(self, references: list[dict]) -> list[ResolvedReference]:
+        resolved: list[ResolvedReference] = []
+
+        for ref in references:
+            url = ref.get("url", "")
+            document_id, version = self._extract_ref_from_url(url)
+            pdf_path = self._find_policy_pdf(document_id)
+
+            if not pdf_path:
+                resolved.append(
+                    ResolvedReference(
+                        document_id=document_id,
+                        version=version,
+                        status="UNRESOLVED",
+                        url=url,
+                    )
                 )
-                
-                finding = PolicyFinding(
-                    finding_id=f"B-{finding_counter:03d}",
-                    finding_type="BLIND_SPOT",
-                    severity="Advisory",
-                    title=f"No Control Mechanism for {topic.upper()} Compliance",
-                    description=description,
-                    affected_sections=affected_sections,
-                    cited_excerpts=cited_excerpts,
-                    confidence_score=confidence_score,
-                    confidence_reason=confidence_reason,
-                    remediation_notes=f"Policy owner should define a control to monitor and enforce {topic} compliance."
+                continue
+
+            content = self._load_pdf_text(pdf_path)
+            title = self._extract_title_from_pdf_filename(pdf_path, document_id)
+            doc_version, _ = self._extract_document_id_and_version(content)
+            if doc_version and doc_version != "v1.0":
+                version = doc_version
+
+            resolved.append(
+                ResolvedReference(
+                    document_id=document_id,
+                    version=version,
+                    title=title,
+                    content=content,
+                    status="resolved",
+                    url=url,
                 )
-                findings.append(finding)
-                finding_counter += 1
-
-            if topic_in_policy and not topic_in_risks:
-                affected_sections = [
-                    section_num for section_num, section_data in sections.items()
-                    if any(kw in section_data['content'].lower() for kw in keywords)
-                ]
-                
-                description = f"Policy addresses {topic} in sections {', '.join(affected_sections)}, but no corresponding risk is documented for {topic} non-compliance or failure. This gap may indicate incomplete risk assessment."
-                cited_excerpts = [sections[s]['content'][:120] for s in affected_sections if s in sections]
-                
-                confidence_score, confidence_reason = await self._score_finding_confidence(
-                    "BLIND_SPOT",
-                    description,
-                    cited_excerpts
-                )
-                
-                finding = PolicyFinding(
-                    finding_id=f"B-{finding_counter:03d}",
-                    finding_type="BLIND_SPOT",
-                    severity="Advisory",
-                    title=f"No Risk Documented for {topic.upper()} Non-Compliance",
-                    description=description,
-                    affected_sections=affected_sections,
-                    cited_excerpts=cited_excerpts,
-                    confidence_score=confidence_score,
-                    confidence_reason=confidence_reason,
-                    remediation_notes=f"Policy owner should document risks associated with {topic} non-compliance."
-                )
-                findings.append(finding)
-                finding_counter += 1
-
-        if 'approval' in policy_text:
-            approval_sections = [
-                section_num for section_num, section_data in sections.items()
-                if 'approval' in section_data['content'].lower()
-            ]
-            if approval_sections and not any('bypass' in r.lower() or 'unauthorized' in r.lower() for r in related_risks):
-                description = f"Policy requires approval in sections {', '.join(approval_sections)}, but no risk is documented for approval workflow bypass, unauthorized approval, or approval circumvention. This creates unmitigated operational risk."
-                cited_excerpts = [sections[s]['content'][:120] for s in approval_sections if s in sections]
-                
-                confidence_score, confidence_reason = await self._score_finding_confidence(
-                    "BLIND_SPOT",
-                    description,
-                    cited_excerpts
-                )
-                
-                finding = PolicyFinding(
-                    finding_id=f"B-{finding_counter:03d}",
-                    finding_type="BLIND_SPOT",
-                    severity="Advisory",
-                    title="Approval Bypass Risk Not Documented",
-                    description=description,
-                    affected_sections=approval_sections,
-                    cited_excerpts=cited_excerpts,
-                    confidence_score=confidence_score,
-                    confidence_reason=confidence_reason,
-                    remediation_notes="Policy owner should document risks related to approval workflow failures and define compensating controls."
-                )
-                findings.append(finding)
-                finding_counter += 1
-
-        return findings
-
-    def _analyze_controls(self, controls: list[str], findings: list[PolicyFinding]) -> list[ControlFinding]:
-        """Analyze control enforceability based on findings."""
-        control_findings = []
-        
-        for idx, control in enumerate(controls):
-            control_id = f"CTR-{idx + 1:03d}"
-            linked_findings = []
-            status = "Enforceable"
-            
-            for finding in findings:
-                if finding.finding_type == "CONFLICT":
-                    if any(threshold in control for threshold in re.findall(r'EUR\s+\d+', control)):
-                        linked_findings.append(finding.finding_id)
-                        status = "Partially Enforceable"
-                elif finding.finding_type == "INCONSISTENCY":
-                    if any(word in control.lower() for word in ['approval', 'submission', 'deadline']):
-                        linked_findings.append(finding.finding_id)
-                        if status == "Enforceable":
-                            status = "Partially Enforceable"
-
-            notes = f"Control {control_id} is {status.lower()}"
-            if linked_findings:
-                notes += f" due to findings: {', '.join(linked_findings)}"
-
-            control_findings.append(ControlFinding(
-                control_id=control_id,
-                control_text=control,
-                status=status,
-                linked_findings=linked_findings,
-                notes=notes
-            ))
-
-        return control_findings
-
-    def _analyze_risks(self, related_risks: list[str], findings: list[PolicyFinding], sections: dict) -> list[RiskFinding]:
-        """Analyze risk mitigation based on policy coverage."""
-        risk_findings = []
-        
-        for idx, risk in enumerate(related_risks):
-            risk_id = f"RTR-{idx + 1:03d}"
-            linked_findings = []
-            status = "Mitigated"
-            policy_coverage = "Fully Covered"
-            
-            risk_lower = risk.lower()
-            
-            if 'unapproved' in risk_lower or 'approval' in risk_lower:
-                if any('approval' in section_data['content'].lower() for section_data in sections.values()):
-                    policy_coverage = "Fully Covered"
-                else:
-                    policy_coverage = "Uncovered"
-                    status = "Unmitigated"
-            elif 'expenditure' in risk_lower or 'expense' in risk_lower:
-                if any('expense' in section_data['content'].lower() or 'submission' in section_data['content'].lower() 
-                       for section_data in sections.values()):
-                    policy_coverage = "Fully Covered"
-                else:
-                    policy_coverage = "Uncovered"
-                    status = "Unmitigated"
-            else:
-                policy_coverage = "Partially Covered"
-                status = "Partially Mitigated"
-
-            for finding in findings:
-                if finding.finding_type in ["CONFLICT", "INCONSISTENCY"]:
-                    linked_findings.append(finding.finding_id)
-                    if status == "Mitigated":
-                        status = "Partially Mitigated"
-
-            notes = f"Risk {risk_id} is {status.lower()} with {policy_coverage.lower()} policy coverage"
-
-            risk_findings.append(RiskFinding(
-                risk_id=risk_id,
-                risk_text=risk,
-                status=status,
-                policy_coverage=policy_coverage,
-                linked_findings=linked_findings,
-                notes=notes
-            ))
-
-        return risk_findings
-
-    async def _score_finding_confidence(self, finding_type: str, finding_description: str, cited_excerpts: list[str]) -> tuple[float, str]:
-        """Use LLM to determine confidence score for a finding. Throws error if LLM fails."""
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a policy analysis expert. Given a finding, determine its confidence score (0-100%) and provide a one-line reason.
-
-Consider:
-- Explicitness of evidence in policy text
-- Clarity of the issue described
-- Potential for misinterpretation
-- Completeness of cited excerpts
-
-Respond in JSON format: {"confidence_score": <number>, "reason": "<one-line reason>"}"""),
-            ("user", f"""Assess confidence for this {finding_type} finding:
-
-Description: {finding_description}
-
-Cited Excerpts:
-{chr(10).join([f"- {excerpt[:200]}" for excerpt in cited_excerpts])}
-
-Provide confidence score (0-100) and reason.""")
-        ])
-        
-        response = await self.llm.ainvoke(prompt.format_messages())
-        response_text = response.content
-        
-        import json
-        parsed = json.loads(response_text)
-        score = float(parsed.get("confidence_score"))
-        reason = str(parsed.get("reason"))
-        
-        if not isinstance(score, (int, float)) or score < 0 or score > 100:
-            raise ValueError(f"Invalid confidence score from LLM: {score}. Must be 0-100.")
-        
-        if not reason or not isinstance(reason, str):
-            raise ValueError(f"Invalid reason from LLM: {reason}. Must be non-empty string.")
-        
-        logger.info(f"LLM confidence score for {finding_type}: {score}% - {reason}")
-        return float(score), reason
-
-    async def _llm_analyze_findings(self, policy_template: str, controls: list[str], risks: list[str]) -> dict:
-        """Use LLM to perform sophisticated analysis based on system prompt."""
-        try:
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", self.SYSTEM_PROMPT),
-                ("user", f"""Analyze this policy for conflicts, inconsistencies, and blind spots.
-
-POLICY TEMPLATE:
-{policy_template[:4000]}
-
-CONTROLS:
-{chr(10).join(controls)}
-
-RELATED RISKS:
-{chr(10).join(risks)}
-
-Provide findings in JSON format with exact section citations and confidence scores.""")
-            ])
-            
-            response = await self.llm.ainvoke(prompt.format_messages())
-            logger.info("LLM analysis completed")
-            return {"llm_analysis": response.content}
-        except Exception as e:
-            logger.warning(f"LLM analysis failed, falling back to rule-based detection: {e}")
-            return {"llm_analysis": None}
-
-    async def analyze_policy(self, policy_data: dict) -> dict:
-        """Perform comprehensive policy review analysis without external references."""
-        try:
-            logger.info(f"Starting policy review analysis for: {policy_data.get('documentName')}")
-            
-            template = policy_data.get('template', '')
-            if not template:
-                logger.error("No policy template provided")
-                return {
-                    "success": False,
-                    "error": "Policy template is required",
-                    "document_name": policy_data.get('documentName', ''),
-                    "document_id": "UNKNOWN",
-                    "document_version": "1.0",
-                    "analysis_timestamp": datetime.utcnow().isoformat(),
-                    "findings": [],
-                    "control_analysis": [],
-                    "risk_analysis": [],
-                    "summary": {},
-                    "overall_compliance_status": "Unknown"
-                }
-            
-            doc_id, doc_version = self._extract_document_id_and_version(template)
-            sections = self._extract_sections(template)
-            
-            logger.info(f"Extracted document: {doc_id} v{doc_version} with {len(sections)} sections")
-            
-            llm_result = await self._llm_analyze_findings(
-                template,
-                policy_data.get('controls', []),
-                policy_data.get('relatedRisks', [])
             )
 
-            conflicts = await self._detect_conflicts(sections, [])
-            inconsistencies = await self._detect_inconsistencies(sections, [])
-            blind_spots = await self._detect_blind_spots(sections, policy_data.get('controls', []), policy_data.get('relatedRisks', []))
-            
-            all_findings = conflicts + inconsistencies + blind_spots
-            
-            logger.info(f"Detected {len(conflicts)} conflicts, {len(inconsistencies)} inconsistencies, {len(blind_spots)} blind spots")
+        return resolved
 
-            control_analysis = self._analyze_controls(policy_data.get('controls', []), all_findings)
-            risk_analysis = self._analyze_risks(policy_data.get('relatedRisks', []), all_findings, sections)
-            
-            blocking_count = len([f for f in all_findings if f.severity == "Blocking"])
-            non_blocking_count = len([f for f in all_findings if f.severity == "Non-Blocking"])
-            advisory_count = len([f for f in all_findings if f.severity == "Advisory"])
-            
-            if blocking_count > 0:
-                overall_status = "Non-Compliant"
-            elif non_blocking_count > 0:
-                overall_status = "Compliant with Exceptions"
-            else:
-                overall_status = "Compliant"
+    def _build_analysis_context(
+        self,
+        policy_data: dict,
+        resolved_refs: list[ResolvedReference],
+    ) -> dict:
+        return {
+            "primary_policy": policy_data.get("template", ""),
+            "references": [
+                {
+                    "document_id": ref.document_id,
+                    "version": ref.version,
+                    "title": ref.title,
+                    "content": ref.content,
+                    "status": ref.status,
+                }
+                for ref in resolved_refs
+                if ref.status == "resolved"
+            ],
+            "controls": policy_data.get("controls", []),
+            "related_risks": policy_data.get("relatedRisks", []),
+        }
 
-            summary = {
-                "total_findings": len(all_findings),
-                "conflicts": len(conflicts),
-                "inconsistencies": len(inconsistencies),
-                "blind_spots": len(blind_spots),
-                "blocking_findings": blocking_count,
-                "non_blocking_findings": non_blocking_count,
-                "advisory_findings": advisory_count,
-                "controls_enforceable": len([c for c in control_analysis if c.status == "Enforceable"]),
-                "controls_partially_enforceable": len([c for c in control_analysis if c.status == "Partially Enforceable"]),
-                "controls_unenforceable": len([c for c in control_analysis if c.status == "Unenforceable"]),
-                "risks_mitigated": len([r for r in risk_analysis if r.status == "Mitigated"]),
-                "risks_partially_mitigated": len([r for r in risk_analysis if r.status == "Partially Mitigated"]),
-                "risks_unmitigated": len([r for r in risk_analysis if r.status == "Unmitigated"]),
-                "sections_analyzed": len(sections),
+    def _format_reference_block(self, resolved_refs: list[ResolvedReference]) -> str:
+        blocks = []
+        for ref in resolved_refs:
+            if ref.status != "resolved":
+                blocks.append(
+                    f"REFERENCE {ref.document_id} {ref.version} — STATUS: UNRESOLVED (URL: {ref.url})"
+                )
+                continue
+            blocks.append(
+                f"REFERENCE POLICY: {ref.document_id} {ref.version}\n"
+                f"TITLE: {ref.title}\n"
+                f"CONTENT:\n{ref.content[:12000]}"
+            )
+        return "\n\n---\n\n".join(blocks) if blocks else "No referenced policies provided."
+
+    async def _run_llm_analysis(
+        self,
+        policy_data: dict,
+        resolved_refs: list[ResolvedReference],
+        unresolved_count: int,
+    ) -> _LLMReport:
+        primary_id, primary_version = self._extract_document_id_and_version(
+            policy_data.get("template", "")
+        )
+        primary_title = self._extract_primary_title(
+            policy_data.get("template", ""),
+            policy_data.get("documentName", ""),
+        )
+
+        controls = policy_data.get("controls", [])
+        risks = policy_data.get("relatedRisks", [])
+
+        user_content = f"""Analyze the primary local policy against referenced global policies, controls, and risks.
+
+PRIMARY LOCAL POLICY:
+Document ID: {primary_id}
+Version: {primary_version}
+Title: {primary_title}
+
+{policy_data.get("template", "")[:12000]}
+
+REFERENCED POLICIES:
+{self._format_reference_block(resolved_refs)}
+
+LINKED CONTROLS:
+{chr(10).join(controls) if controls else "None provided."}
+
+LINKED RISKS:
+{chr(10).join(risks) if risks else "None provided."}
+
+Unresolved reference count: {unresolved_count}
+
+Return JSON with:
+- findings: array of findings (types: CONFLICT, INCONSISTENCY, BLIND SPOT, CONTROLS & RISKS)
+- overall_confidence: 0-100 score for the full scan
+
+{self.parser.get_format_instructions()}"""
+
+        response = await self.llm.ainvoke(
+            [
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=user_content),
+            ]
+        )
+
+        raw = response.content if isinstance(response.content, str) else str(response.content)
+        try:
+            return self.parser.parse(raw)
+        except (ValidationError, json.JSONDecodeError) as e:
+            logger.warning(f"Structured parse failed, attempting JSON extraction: {e}")
+            json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not json_match:
+                raise ValueError("LLM did not return valid JSON") from e
+            return _LLMReport.model_validate(json.loads(json_match.group()))
+
+    def _count_findings_by_type(self, findings: list[_LLMFinding]) -> dict[str, int]:
+        counts = {
+            "CONFLICT": 0,
+            "INCONSISTENCY": 0,
+            "BLIND SPOT": 0,
+            "CONTROLS & RISKS": 0,
+        }
+        for finding in findings:
+            normalized = finding.type.strip().upper()
+            if normalized in counts:
+                counts[normalized] += 1
+            elif "CONTROL" in normalized or "RISK" in normalized:
+                counts["CONTROLS & RISKS"] += 1
+        return counts
+
+    def _compute_overall_confidence(
+        self,
+        llm_report: _LLMReport,
+        findings: list[_LLMFinding],
+        unresolved_count: int,
+    ) -> float:
+        if llm_report.overall_confidence is not None:
+            base = float(llm_report.overall_confidence)
+        elif findings:
+            base = sum(f.confidence for f in findings) / len(findings)
+        else:
+            base = 100.0
+
+        deduction = unresolved_count * self.CONFIDENCE_DEDUCTION_UNRESOLVED
+        return max(0.0, min(100.0, base - deduction))
+
+    def _normalize_finding(self, finding: _LLMFinding) -> dict:
+        source_b = None
+        if finding.source_b and any(
+            [
+                finding.source_b.document_id,
+                finding.source_b.section,
+                finding.source_b.excerpt,
+            ]
+        ):
+            source_b = {
+                "document_id": finding.source_b.document_id,
+                "version": finding.source_b.version,
+                "section": finding.source_b.section,
+                "excerpt": finding.source_b.excerpt,
             }
 
-            return {
-                "success": True,
-                "document_name": policy_data.get('documentName', ''),
-                "document_id": doc_id,
-                "document_version": doc_version,
-                "analysis_timestamp": datetime.utcnow().isoformat(),
-                "findings": [f.model_dump() for f in all_findings],
-                "control_analysis": [c.model_dump() for c in control_analysis],
-                "risk_analysis": [r.model_dump() for r in risk_analysis],
-                "summary": summary,
-                "overall_compliance_status": overall_status
-            }
+        return {
+            "id": finding.id,
+            "type": finding.type,
+            "severity": finding.severity,
+            "title": finding.title,
+            "source_a": {
+                "document_id": finding.source_a.document_id,
+                "version": finding.source_a.version,
+                "section": finding.source_a.section,
+                "excerpt": finding.source_a.excerpt,
+            },
+            "source_b": source_b,
+            "issue": finding.issue,
+            "proposed_resolution": finding.proposed_resolution,
+            "confidence": finding.confidence,
+            "status": "Awaiting SME",
+        }
 
-        except Exception as e:
-            logger.error(f"Policy review analysis failed: {e}", exc_info=True)
+    async def analyze_consistency(self, policy_data: dict) -> dict:
+        """Run UC 3.3 policy consistency analysis (local + referenced global + controls + risks)."""
+        document_name = policy_data.get("documentName", "")
+        template = policy_data.get("template", "")
+
+        if not template:
             return {
                 "success": False,
-                "error": str(e),
-                "document_name": policy_data.get('documentName', ''),
-                "document_id": "UNKNOWN",
-                "document_version": "1.0",
-                "analysis_timestamp": datetime.utcnow().isoformat(),
-                "findings": [],
-                "control_analysis": [],
-                "risk_analysis": [],
-                "summary": {},
-                "overall_compliance_status": "Unknown"
+                "message": "Policy template is required",
+                "report": None,
             }
+
+        logger.info(f"Starting consistency analysis for: {document_name}")
+
+        primary_id, primary_version = self._extract_document_id_and_version(template)
+        primary_title = self._extract_primary_title(template, document_name)
+
+        resolved_refs = self._resolve_references(policy_data.get("references", []))
+        unresolved_count = sum(1 for ref in resolved_refs if ref.status == "UNRESOLVED")
+
+        context = self._build_analysis_context(policy_data, resolved_refs)
+        logger.info(
+            f"Analysis context built: {len(context['references'])} resolved references, "
+            f"{len(context['controls'])} controls, {len(context['related_risks'])} risks"
+        )
+
+        llm_report = await self._run_llm_analysis(policy_data, resolved_refs, unresolved_count)
+
+        normalized_findings = [self._normalize_finding(f) for f in llm_report.findings]
+        type_counts = self._count_findings_by_type(llm_report.findings)
+
+        blocking_issues = sum(
+            1
+            for f in llm_report.findings
+            if f.type.strip().upper() == "CONFLICT" and f.severity.strip().lower() == "blocking"
+        )
+
+        overall_confidence = self._compute_overall_confidence(
+            llm_report, llm_report.findings, unresolved_count
+        )
+
+        report = {
+            "scan_date": datetime.now(timezone.utc),
+            "primary_policy": {
+                "policy_id": primary_id,
+                "title": primary_title,
+                "version": primary_version,
+            },
+            "references_fetched": [
+                {
+                    "document_id": ref.document_id,
+                    "version": ref.version,
+                    "status": ref.status.lower() if ref.status == "resolved" else ref.status,
+                }
+                for ref in resolved_refs
+            ],
+            "summary": {
+                "conflicts": type_counts["CONFLICT"],
+                "inconsistencies": type_counts["INCONSISTENCY"],
+                "blind_spots": type_counts["BLIND SPOT"],
+                "controls_and_risks": type_counts["CONTROLS & RISKS"],
+            },
+            "overall_confidence": round(overall_confidence, 1),
+            "publication_readiness": {
+                "status": "NOT READY" if blocking_issues > 0 else "READY",
+                "blocking_issues": blocking_issues,
+            },
+            "findings": normalized_findings,
+        }
+
+        logger.info(
+            f"Consistency analysis completed for {document_name}: "
+            f"{len(normalized_findings)} findings, readiness={report['publication_readiness']['status']}"
+        )
+
+        return {"success": True, "report": report}

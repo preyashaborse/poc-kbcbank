@@ -230,3 +230,63 @@ class ReviewAnalysisResponse(BaseModel):
     risk_analysis: list[RiskAnalysis]
     summary: dict = Field(description="Summary counts by finding type and severity")
     overall_compliance_status: str = Field(description="Compliant, Compliant with Exceptions, or Non-Compliant")
+
+
+class PolicyFindingSource(BaseModel):
+    document_id: str = ""
+    version: str = ""
+    section: str = ""
+    excerpt: str = ""
+
+
+class PolicyFinding(BaseModel):
+    id: str
+    type: str = Field(description="CONFLICT, INCONSISTENCY, BLIND SPOT, or CONTROLS & RISKS")
+    severity: str = Field(description="Blocking, Non-Blocking, or Advisory")
+    title: str
+    source_a: PolicyFindingSource
+    source_b: PolicyFindingSource | None = None
+    issue: str
+    proposed_resolution: str
+    confidence: float = Field(ge=0, le=100)
+    status: str = "Awaiting SME"
+
+
+class PublicationReadiness(BaseModel):
+    status: str = Field(description="READY or NOT READY")
+    blocking_issues: int = 0
+
+
+class ConsistencySummary(BaseModel):
+    conflicts: int = 0
+    inconsistencies: int = 0
+    blind_spots: int = 0
+    controls_and_risks: int = 0
+
+
+class PrimaryPolicyInfo(BaseModel):
+    policy_id: str
+    title: str
+    version: str
+
+
+class ReferenceFetched(BaseModel):
+    document_id: str
+    version: str = ""
+    status: str = Field(description="resolved or UNRESOLVED")
+
+
+class ConsistencyAnalysisReport(BaseModel):
+    scan_date: datetime
+    primary_policy: PrimaryPolicyInfo
+    references_fetched: list[ReferenceFetched] = []
+    summary: ConsistencySummary
+    overall_confidence: float = Field(ge=0, le=100)
+    publication_readiness: PublicationReadiness
+    findings: list[PolicyFinding] = []
+
+
+class PolicyConsistencyAnalysisResponse(BaseModel):
+    success: bool
+    report: ConsistencyAnalysisReport | None = None
+    message: str | None = None

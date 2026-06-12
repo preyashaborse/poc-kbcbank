@@ -19,6 +19,7 @@ from schemas.requests import (
     AnalyzePolicyImpactRequest,
     CreateRiskRequest,
     ExtractObligationsRequest,
+    PolicyConsistencyAnalysisRequest,
     PolicyGapAnalysisRequest,
     RegulatoryPolicyGapAnalysisRequest,
 )
@@ -38,7 +39,7 @@ from schemas.responses import (
     RegulatoryChangeAlertResponse,
     RegulatoryPolicyGapAnalysisResponse,
     RegulatorySectionGapAnalysis,
-    ReviewAnalysisResponse,
+    PolicyConsistencyAnalysisResponse,
     RiskResponse,
     SectionGapAnalysis,
 )
@@ -1337,63 +1338,117 @@ async def analyze_linked_policy(body: AnalyzeLinkedPolicyRequest):
         )
 
 
-@app.post("/review-analysis/{document_name}", response_model=ReviewAnalysisResponse)
+async def _load_policy_document_for_consistency(document_name: str) -> dict | None:
+    with get_db() as db:
+        policy_document = (
+            db.query(PolicyDocument)
+            .filter(PolicyDocument.documentName == document_name)
+            .first()
+        )
+        if not policy_document:
+            return None
+        return policy_document_to_dict(policy_document)
+
+
+async def _perform_consistency_analysis(document_name: str) -> PolicyConsistencyAnalysisResponse | JSONResponse:
+    """UC 3.3 — consistency review of local policy + referenced global + controls + risks."""
+    logger.info(f"Starting consistency analysis for document_name: {document_name}")
+
+    policy_dict = await _load_policy_document_for_consistency(document_name)
+    if not policy_dict:
+        logger.warning(f"Policy data not found for document_name: {document_name}")
+        return JSONResponse(
+            status_code=404,
+            content={
+                "success": False,
+                "message": f"Policy data not found for document_name: {document_name}",
+            },
+        )
+
+    analyzer = PolicyReviewAnalyzer()
+    result = await analyzer.analyze_consistency(policy_dict)
+
+    if not result.get("success"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": result.get("message", "Analysis failed"),
+            },
+        )
+
+    report = result["report"]
+    logger.info(
+        f"Consistency analysis completed for {document_name}. "
+        f"Findings: {len(report['findings'])}, "
+        f"readiness: {report['publication_readiness']['status']}"
+    )
+    return PolicyConsistencyAnalysisResponse(success=True, report=report)
+
+
+@app.post("/review-analysis/{document_name}", response_model=PolicyConsistencyAnalysisResponse)
 async def review_analysis(document_name: str):
     """
-    Perform comprehensive policy review analysis using policy document data from the database.
-    
-    Takes only a documentName as path parameter and fetches the policy data from PolicyDocument.
-    
-    Scans the policy for:
-    - CONFLICT: Blocking severity issues where provisions cannot coexist
-    - INCONSISTENCY: Non-blocking ambiguities or procedural confusion
-    - BLIND_SPOT: Advisory gaps in policy coverage
-    - CONTROL & RISK analysis: Enforceability and mitigation status
-    
-    Fetches and analyzes referenced documents. Produces structured findings
-    with exact section citations and confidence scores.
+    UC 3.3 Policy Consistency Analysis.
+
+    Loads the local PolicyDocument draft, resolves referenced global policy PDFs from
+    Files/policies/, and runs a single LLM scan for CONFLICT, INCONSISTENCY, BLIND SPOT,
+    and CONTROLS & RISKS findings with publication readiness.
     """
     try:
-        logger.info(f"Starting review analysis for document_name: {document_name}")
-
-        with get_db() as db:
-            policy_document = (
-                db.query(PolicyDocument)
-                .filter(PolicyDocument.documentName == document_name)
-                .first()
-            )
-            if not policy_document:
-                logger.warning(f"Policy data not found for document_name: {document_name}")
-                return JSONResponse(
-                    status_code=404,
-                    content={"success": False, "message": f"Policy data not found for document_name: {document_name}"},
-                )
-            policy_dict = policy_document_to_dict(policy_document)
-
-        analyzer = PolicyReviewAnalyzer()
-        result = await analyzer.analyze_policy(policy_dict)
-        
-        if not result.get("success"):
-            logger.error(f"Policy analysis failed: {result.get('error')}")
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "message": result.get("error", "Analysis failed")},
-            )
-        
-        logger.info(f"Review analysis completed for {policy_dict['documentName']}. Found {result['summary']['total_findings']} findings.")
-        return ReviewAnalysisResponse(**result)
-        
+        return await _perform_consistency_analysis(document_name)
     except ValueError as e:
-        logger.error(f"Validation error in review analysis: {e}")
+        logger.error(f"Validation error in consistency analysis: {e}")
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": str(e)},
         )
     except Exception as e:
-        logger.error(f"Unexpected error in review analysis: {e}", exc_info=True)
+        logger.error(f"Unexpected error in consistency analysis: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"success": False, "message": f"Failed to perform review analysis: {str(e)}"},
+            content={"success": False, "message": f"Failed to perform consistency analysis: {str(e)}"},
+        )
+
+
+@app.post(
+    "/policies/{document_name}/consistency-analysis",
+    response_model=PolicyConsistencyAnalysisResponse,
+)
+async def policy_consistency_analysis(document_name: str):
+    """Alias for UC 3.3 consistency analysis keyed by PolicyDocument.documentName."""
+    try:
+        return await _perform_consistency_analysis(document_name)
+    except ValueError as e:
+        logger.error(f"Validation error in consistency analysis: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in consistency analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to perform consistency analysis: {str(e)}"},
+        )
+
+
+@app.post("/policies/consistency-analysis", response_model=PolicyConsistencyAnalysisResponse)
+async def policy_consistency_analysis_by_body(body: PolicyConsistencyAnalysisRequest):
+    """UC 3.3 consistency analysis accepting document_name in the request body."""
+    try:
+        return await _perform_consistency_analysis(body.document_name)
+    except ValueError as e:
+        logger.error(f"Validation error in consistency analysis: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in consistency analysis: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to perform consistency analysis: {str(e)}"},
         )
 
 
