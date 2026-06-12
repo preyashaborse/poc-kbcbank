@@ -386,9 +386,16 @@ Return JSON with:
         )
 
         raw = response.content if isinstance(response.content, str) else str(response.content)
+        return self._parse_llm_report(raw)
+
+    def _parse_llm_report(self, raw: str) -> _LLMReport:
+        """Parse LLM JSON output into _LLMReport (parser returns dict, not a model)."""
         try:
-            return self.parser.parse(raw)
-        except (ValidationError, json.JSONDecodeError) as e:
+            parsed = self.parser.parse(raw)
+            if isinstance(parsed, _LLMReport):
+                return parsed
+            return _LLMReport.model_validate(parsed)
+        except (ValidationError, json.JSONDecodeError, TypeError) as e:
             logger.warning(f"Structured parse failed, attempting JSON extraction: {e}")
             json_match = re.search(r"\{.*\}", raw, re.DOTALL)
             if not json_match:
