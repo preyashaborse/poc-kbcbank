@@ -3,6 +3,7 @@ uvicorn[standard]
 python-dotenv
 sqlalchemy
 langchain
+langchain-core
 langchain-openai
 langchain-community
 pypdf

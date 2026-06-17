@@ -67,3 +67,24 @@ class PolicyRewritingAnalysisRequest(BaseModel):
     template_context: str = Field(
         description="Organizational policy template context from UI"
     )
+
+
+class PolicyDocumentReferenceInput(BaseModel):
+    url: str
+
+
+class MetadataTaggingRequest(BaseModel):
+    """Open PDMS policy form payload for UC 4.1 metadata tagging."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_name: str = Field(alias="documentName")
+    template: str = Field(description="Policy body text — required for extraction")
+    document_type: Optional[str] = Field(default=None, alias="documentType")
+    approval_type: Optional[str] = Field(default=None, alias="approvalType")
+    category: Optional[str] = None
+    description: Optional[str] = None
+    effective_from: Optional[str] = Field(default=None, alias="effectiveFrom")
+    controls: list[str] = Field(default_factory=list)
+    related_risks: list[str] = Field(default_factory=list, alias="relatedRisks")
+    references: list[PolicyDocumentReferenceInput] = Field(default_factory=list)

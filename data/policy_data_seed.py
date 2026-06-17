@@ -70,5 +70,73 @@ Senior Manager: An employee at or above the grade designated as Senior Manager i
         "relatedRisks": [
             "RTR-001-Unapproved Business Travel Expenditure-Belgian employees incur business travel costs without obtaining required pre-approval, resulting in financial exposure and audit findings. Risk is heightened by KATE's automated booking capability which may bypass line manager approval workflows.",
         ],
-    }
+    },
+    {
+        "documentName": "KBC Group Operational Risk Management and Related Procedures Policy Document",
+        "documentType": "Operational Risk Policy",
+        "approvalType": "Mandatory",
+        "category": "Risk Management",
+        "description": "Sets out KBC's framework, requirements, approach, methodology, and guiding principles relating to the management of operational risks, including but not limited to risks arising from people, systems, processes, and external events. Applies exclusively to employees within the Risk Management and Compliance functions. Covers risk identification, assessment, roles and responsibilities, controls framework, and incident reporting.",
+        "effectiveFrom": "To be confirmed",
+        "references": [],
+        "template": """POL-007 — Operational Risk Management and Related Procedures Policy Document — vTBD
+
+1.0 Introduction and Background Context
+The purpose of this policy document is to ensure that the requisite structures, governance mechanisms, oversight protocols, and operational parameters necessary for the adequate and sufficient management of operational risk are duly established, maintained, and periodically reviewed in a manner consistent with applicable regulatory expectations and internal risk appetite thresholds as may be defined from time to time by senior management.
+
+Operational risk, as further defined herein (refer also to Section 3 Definitions as well as the Glossary of Terms appended to this document — note: Glossary is forthcoming and will be added in a future version), encompasses all risks other than credit risk and market risk.
+
+2.0 Applicability
+This policy applies exclusively to employees within the Risk Management and Compliance functions. Business line staff, relationship managers, and product managers are not subject to this policy unless directed otherwise by their line manager.
+
+3.0 Definitions
+The following terms are used throughout this policy. Note that some terms may have different meanings in other KBC policy documents.
+
+Operational Risk: The risk of loss resulting from inadequate or failed internal processes, people and systems, or from external events. Does not include strategic or reputational risk.
+Risk Event: Any event that results in or could result in financial or non-financial loss.
+Control: A measure put in place to reduce the likelihood or impact of a risk. Also referred to as a 'safeguard', 'mitigation', or 'countermeasure' in this document.
+RCSA: Risk and Control Self Assessment.
+
+5.0 Roles and Responsibilities
+Accountability for operational risk management is distributed as follows. Note that the 'Three Lines of Defence' model underpins this framework (see Figure 1 below).
+
+[FIGURE 1 — Three Lines of Defence Diagram to be inserted here]
+
+1st Line — Business Units: Identify, assess, and manage operational risks within their area. Escalation Path: Chief Risk Officer.
+2nd Line — Risk & Compliance: Provide oversight, challenge, and independent review. Escalation Path: Board Risk Committee.
+3rd Line — Internal Audit: Independent assurance over risk and control effectiveness. Escalation Path: [not specified].
+Op Risk Team: Maintain the op risk framework and loss event database. [Escalation path not specified.]
+
+6.0 Risk Identification and Assessment
+Op Risk Incidents should be identified as soon as practicably possible and upon identification it is expected that the relevant member of staff will endeavour to ensure that the appropriate teams are informed in accordance with the applicable notification timelines.
+
+Key steps in the risk identification process include the following:
+- All operational loss events above EUR 10,000 must be logged within 24 hours.
+– Near-miss events should also be considered for logging where appropriate.
+* The RCSA process is conducted bi-annually (also referred to as semi-annually or every 6 months in other sections).
+- Escalation of significant Op Risk Incidents to senior management should be done in a timely manner.
+
+7.0 Incident Reporting and Notification
+All Op Risk Incidents, Operational Loss Events, and Near-Miss Events (collectively, 'Risk Occurrences' for the purposes of this section only) must be reported via the KBC Risk Portal within the timeframe specified in Section 4.
+
+For incidents that are considered to be of a critical nature (as determined subjectively by the first-line manager), immediate verbal notification to the Group CRO is required prior to formal logging.
+
+8.0 Controls Framework
+KBC operates a controls framework aligned to COSO, ISO 31000, and the BCBS 239 principles. Controls are classified as preventive, detective, or corrective safeguards (see also: mitigations, countermeasures — refer Section 3).
+
+[FIGURE 2 — Control effectiveness heat-map — image to be embedded]
+
+9.0 Getting Help
+If you have questions regarding this Policy, or if you feel that a breach of this Policy may have occurred, or if you are unsure as to whether a particular action or course of action which you are contemplating may or may not constitute a breach of this Policy, please contact one of the following teams:
+- Group CRO / CFO Office — for capital adequacy queries.
+- KBC Compliance Advisory — for policy guidance.
+- KBC Ethics & Compliance Helpline — for confidential concerns; contact: ethics.helpline@kbc
+- Op Risk Team — oprisk@kbcgroup""",
+        "controls": [
+            "CTR-007-RCSA Process (Bi-Annual): Risk and Control Self Assessment conducted bi-annually (also referred to as semi-annually or every 6 months) across applicable functions. Scope limited to Risk Management and Compliance functions per Section 2."
+        ],
+        "relatedRisks": [
+            "RTR-007-Unidentified Operational Loss Events-Op Risk Incidents are not identified or logged within required timeframes, resulting in regulatory reporting failures and financial exposure. Risk is heightened by ambiguous notification requirements and subjective escalation criteria."
+        ],
+    },
 ]

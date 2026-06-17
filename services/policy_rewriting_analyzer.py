@@ -1,4 +1,5 @@
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
@@ -54,6 +55,13 @@ Identify content that cannot be easily parsed or processed:
 - Malformed or poorly structured tables
 - Unparseable content (corrupted text, unclear formatting)
 - Missing metadata or context for automated processing
+- Tables with text overflow or truncated content
+- Column width issues preventing proper content display
+- Row height issues affecting readability
+- Misaligned cells within tables
+- Inconsistent table styling across the document
+- Table content extending beyond page margins
+- Unstructured data that should be in tabular format
 
 ### 4. Consistency
 Identify terminology and concept mismatches:
@@ -139,8 +147,6 @@ Then provide overall scores and rationale for each dimension, and finally an ove
 
 {self.parser.get_format_instructions()}"""
 
-        from langchain_core.messages import HumanMessage, SystemMessage
-
         response = await self.llm.ainvoke(
             [
                 SystemMessage(content=SYSTEM_PROMPT),
@@ -148,8 +154,11 @@ Then provide overall scores and rationale for each dimension, and finally an ove
             ]
         )
 
-        parsed_output = self.parser.parse(response.content)
-        return parsed_output
+        raw = response.content if isinstance(response.content, str) else str(response.content)
+        parsed_output = self.parser.parse(raw)
+        if isinstance(parsed_output, _RewritingReport):
+            return parsed_output
+        return _RewritingReport.model_validate(parsed_output)
 
     def _normalize_report(self, report: _RewritingReport) -> dict:
         """Convert the LLM report to a normalized dictionary format."""

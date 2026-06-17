@@ -23,6 +23,7 @@ from schemas.requests import (
     PolicyGapAnalysisRequest,
     PolicyRewritingAnalysisRequest,
     RegulatoryPolicyGapAnalysisRequest,
+    MetadataTaggingRequest,
 )
 from schemas.responses import (
     AnalyzeLinkedPolicyResponse,
@@ -42,6 +43,7 @@ from schemas.responses import (
     RegulatorySectionGapAnalysis,
     PolicyConsistencyAnalysisResponse,
     PolicyRewritingAnalysisResponse,
+    MetadataTaggingResponse,
     RiskResponse,
     SectionGapAnalysis,
 )
@@ -52,6 +54,7 @@ from services.linked_policy_analyzer import LinkedPolicyAnalyzer
 from services.regulatory_policy_gap_analyzer import RegulatoryPolicyGapAnalyzer
 from services.policy_review_analyzer import PolicyReviewAnalyzer
 from services.policy_rewriting_analyzer import PolicyRewritingAnalyzer
+from services.metadata_tagging_analyzer import MetadataTaggingAnalyzer
 
 load_dotenv()
 
@@ -1507,6 +1510,52 @@ async def policy_rewriting_analysis(body: PolicyRewritingAnalysisRequest):
         return JSONResponse(
             status_code=500,
             content={"success": False, "message": f"Failed to perform rewriting analysis: {str(e)}"},
+        )
+
+
+@app.post("/policies/metadata-tagging", response_model=MetadataTaggingResponse)
+async def metadata_tagging(body: MetadataTaggingRequest):
+    """
+    UC 4.1 — AI-driven metadata tagging.
+
+    Accepts the open PDMS policy form payload and proposes values for metadata
+    fields (Country, Region, Retention Period, etc.) with confidence scores.
+  """
+    try:
+        logger.info(f"Starting metadata tagging for: {body.document_name}")
+
+        form_data = {
+            "documentName": body.document_name,
+            "documentType": body.document_type or "",
+            "approvalType": body.approval_type or "",
+            "category": body.category or "",
+            "description": body.description or "",
+            "effectiveFrom": body.effective_from or "",
+            "template": body.template,
+            "controls": body.controls,
+            "relatedRisks": body.related_risks,
+            "references": [{"url": r.url} for r in body.references],
+        }
+
+        analyzer = MetadataTaggingAnalyzer()
+        result = await analyzer.extract_metadata(form_data)
+
+        return MetadataTaggingResponse(
+            success=True,
+            confidence_threshold=result["confidence_threshold"],
+            proposals=result["proposals"],
+        )
+    except ValueError as e:
+        logger.error(f"Validation error in metadata tagging: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in metadata tagging: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Failed to perform metadata tagging: {str(e)}"},
         )
 
 

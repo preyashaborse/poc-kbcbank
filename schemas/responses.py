@@ -319,3 +319,21 @@ class PolicyRewritingAnalysisResponse(BaseModel):
     success: bool
     analysis: PolicyRewritingAnalysis | None = None
     message: str | None = None
+
+
+class MetadataTaggingProposal(BaseModel):
+    attribute_name: str
+    extracted_value: str
+    confidence_score: float = Field(ge=0, le=100)
+    requires_review: bool = Field(
+        description="True when confidence_score is below deployment threshold"
+    )
+
+
+class MetadataTaggingResponse(BaseModel):
+    success: bool
+    confidence_threshold: float = Field(
+        ge=0, le=100, description="Deployment-level threshold (METADATA_CONFIDENCE_THRESHOLD)"
+    )
+    proposals: list[MetadataTaggingProposal] = []
+    message: str | None = None
